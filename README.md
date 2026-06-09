@@ -2,6 +2,8 @@
 
 本工具是纯前端页面加一个手动更新数据的 Python 脚本。前端负责走势图、策略选号、复式/胆拖展开概率；Python 负责抓取历史开奖并生成 `data/ssq-history.js`。
 
+生产环境地址：https://ssq.iphonex.plus
+
 ## 使用
 
 ```bash
