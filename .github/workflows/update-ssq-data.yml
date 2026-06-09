@@ -1,0 +1,36 @@
+name: Update SSQ Data
+
+on:
+  schedule:
+    - cron: "30 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch latest history
+        run: python fetch_history.py --start 2026001 --workers 8 --sleep 0
+
+      - name: Commit updated data
+        run: |
+          git config user.name "ssq-data-bot"
+          git config user.email "ssq-data-bot@users.noreply.github.com"
+
+          if [ -n "$(git status --porcelain data/ssq-history.js data/ssq-history.json)" ]; then
+            git add data/ssq-history.js data/ssq-history.json
+            git commit -m "Update SSQ history data"
+            git push
+          else
+            echo "No data changes"
+          fi
