@@ -18,6 +18,75 @@ python3 -m http.server 8080
 
 再打开 `http://localhost:8080`。
 
+## Docker 部署
+
+镜像是一体化的：内置 nginx 提供静态页面、cron 定时抓取、容器启动时先后台抓取一次。容器跑起来后访问 `http://<服务器IP>:8081`（映射到容器 80 端口）。
+
+提供三种运行方式。
+
+### 方式 1：本地构建镜像，再运行镜像
+
+不依赖 compose，纯 `docker` 命令：
+
+```bash
+# 构建本地镜像
+docker build -t ssq:local .
+
+# 运行
+docker run -d --name ssq -p 8081:80 -e TZ=Asia/Shanghai --restart unless-stopped ssq:local
+```
+
+### 方式 2：Docker Compose 构建并运行本地镜像
+
+`docker-compose.yml` 已配置 `build: .`，会用当前目录的 Dockerfile 构建本地镜像（标签 `ssq:local`）：
+
+```bash
+docker compose up -d --build
+```
+
+改了代码或 `Dockerfile` 后重新执行同一条命令即可重建。
+
+### 方式 3：生产环境用 docker-compose.prod.yml
+
+`docker-compose.prod.yml` 直接拉取已发布的镜像，无需本地构建：
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+
+### 定时抓取
+
+容器内置 cron，**每周二、四、日 22:00（北京时间）**自动运行：
+
+```bash
+python3 fetch_history.py --months 6
+```
+
+抓取最近 6 个月的滚动窗口数据并刷新 `data/ssq-history.js`。开奖时间约 21:15，官网公布有延迟，定到 22:00 以稳定抓到当天最新一期。容器启动时也会先在后台抓取一次（不阻塞页面启动）。
+
+修改抓取时间编辑 `crontab` 后重建容器（方式 1 重新 `build`+`run`，方式 2/3 重新 `up`）。
+
+### 常用命令
+
+```bash
+# 查看抓取日志（compose）
+docker compose logs -f app
+# 或纯 docker
+docker logs -f ssq
+
+# 手动立即抓取一次
+docker compose exec app python3 fetch_history.py --months 6
+docker exec ssq python3 fetch_history.py --months 6
+
+# 确认时区
+docker compose exec app date
+
+# 停止
+docker compose down                              # 方式 2
+docker compose -f docker-compose.prod.yml down   # 方式 3
+docker rm -f ssq                                 # 方式 1
+```
+
 ## 口径
 
 双色球是随机开奖。工具能提升的是复式、胆拖、多蓝球带来的覆盖概率，并不能预测下一期开奖号码。

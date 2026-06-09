@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime, timedelta
 import json
 import re
+import ssl
 import time
 from pathlib import Path
+from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
@@ -21,11 +24,26 @@ BASE = "https://cp.china-ssq.net/ssq"
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 
+# 容忍证书校验失败（如宿主机时钟偏差导致证书"已过期"）时降级为不校验。
+# 该站点是公开开奖数据、无登录无敏感信息上行，降级仅影响传输校验。
+_INSECURE_CTX = ssl.create_default_context()
+_INSECURE_CTX.check_hostname = False
+_INSECURE_CTX.verify_mode = ssl.CERT_NONE
+
 
 def fetch_text(url: str, timeout: int = 20) -> str:
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen(req, timeout=timeout) as response:
-        return response.read().decode("utf-8", "ignore")
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            return response.read().decode("utf-8", "ignore")
+    except (ssl.SSLError, URLError) as exc:
+        # URLError 可能包裹了 SSLError（如证书过期）；只在 SSL 相关时降级重试。
+        reason = getattr(exc, "reason", exc)
+        if not isinstance(exc, ssl.SSLError) and not isinstance(reason, ssl.SSLError):
+            raise
+        with urlopen(req, timeout=timeout, context=_INSECURE_CTX) as response:
+            return response.read().decode("utf-8", "ignore")
+
 
 
 def detect_latest_issue() -> int:
@@ -71,16 +89,93 @@ def write_data(rows: list[dict[str, object]]) -> None:
     (DATA_DIR / "ssq-history.js").write_text("window.SSQ_HISTORY = " + payload + ";\n", encoding="utf-8")
 
 
+def cutoff_date(months: int) -> date:
+    """Return today minus N months (approximate, calendar-aware)."""
+    today = date.today()
+    year = today.year
+    month = today.month - months
+    while month <= 0:
+        month += 12
+        year -= 1
+    day = min(today.day, 28)  # avoid invalid dates like Feb 30
+    return date(year, month, day)
+
+
+def prev_year_last_issue(year: int) -> int | None:
+    """Probe for the last issue number of the previous year by trying YYYY160 downward."""
+    for seq in range(160, 100, -1):
+        issue = year * 1000 + seq
+        try:
+            parse_issue(issue)
+            return issue
+        except Exception:
+            continue
+    return None
+
+
+def prev_issue(issue: int) -> int | None:
+    """Return the issue right before `issue`, handling year rollover (e.g. 2026001 -> 2025xxx)."""
+    seq = issue % 1000
+    year = issue // 1000
+    if seq > 1:
+        return issue - 1
+    return prev_year_last_issue(year - 1)
+
+
+def parse_issue_with_retry(issue: int, sleep: float, attempts: int = 3) -> dict[str, object]:
+    """parse_issue with retries to tolerate transient network/SSL timeouts."""
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            if sleep:
+                time.sleep(sleep)
+            return parse_issue(issue)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(1)
+    raise last_exc if last_exc else RuntimeError("unknown error")
+
+
+def collect_recent_issues(months: int, latest: int, sleep: float) -> list[int]:
+    """Walk backward from `latest` until a draw older than the cutoff date is reached."""
+    limit = cutoff_date(months)
+    issues: list[int] = []
+    current: int | None = latest
+    while current is not None:
+        try:
+            row = parse_issue_with_retry(current, sleep)
+        except Exception as exc:
+            print(f"skip {current}: {exc}", flush=True)
+            current = prev_issue(current)
+            continue
+        draw_day = datetime.strptime(str(row["date"]), "%Y-%m-%d").date()
+        if draw_day < limit:
+            break
+        issues.append(current)
+        print(f"ok {current} {row['date']}", flush=True)
+        current = prev_issue(current)
+    return issues
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="抓取双色球历史开奖数据")
     parser.add_argument("--start", type=int, default=2026001, help="起始期号，例如 2026001")
     parser.add_argument("--end", type=int, help="结束期号；不传则自动识别最新期号")
+    parser.add_argument("--months", type=int, help="抓取最近 N 个月的滚动窗口；传入则忽略 --start/--end")
     parser.add_argument("--sleep", type=float, default=0.15, help="每期抓取间隔秒数")
     parser.add_argument("--workers", type=int, default=6, help="并发抓取线程数")
     args = parser.parse_args()
 
-    end = args.end or detect_latest_issue()
-    issues = list(range(args.start, end + 1))
+    if args.months:
+        latest = args.end or detect_latest_issue()
+        print(f"最近 {args.months} 个月滚动窗口，最新期号 {latest}", flush=True)
+        issues = collect_recent_issues(args.months, latest, args.sleep)
+        if not issues:
+            raise SystemExit("滚动窗口内没有抓到任何开奖数据")
+    else:
+        end = args.end or detect_latest_issue()
+        issues = list(range(args.start, end + 1))
 
     def fetch_with_retry(issue: int) -> tuple[int, dict[str, object] | None, str | None]:
         for attempt in range(3):

@@ -1,0 +1,13 @@
+name: ssq-tool
+
+services:
+  app:
+    # 生产环境：直接拉取已发布的镜像，无需本地构建
+    image: registry.cn-hangzhou.aliyuncs.com/ityadong/ssq:latest
+    # 每次启动时拉取最新镜像
+    pull_policy: always
+    ports:
+      - "8081:80"
+    environment:
+      TZ: Asia/Shanghai
+    restart: unless-stopped

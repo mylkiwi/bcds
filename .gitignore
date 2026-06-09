@@ -21,3 +21,6 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+
+# 抓取生成的数据，不上传（容器启动和定时任务会自动生成）
+/data/
