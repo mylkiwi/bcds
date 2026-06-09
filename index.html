@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>双色球策略选号工具</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>双色球策略选号工具</h1>
+        <p>基于历史开奖做统计、走势和复式/胆拖覆盖计算。提升的是覆盖概率，不是预测随机结果。</p>
+      </div>
+      <div class="status">
+        <span id="dataStatus">读取数据中</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel controls" aria-label="策略控制">
+        <div class="control-row">
+          <label>
+            统计范围
+            <select id="scopeSelect">
+              <option value="20">近 20 期</option>
+              <option value="30" selected>近 30 期</option>
+              <option value="50">近 50 期</option>
+              <option value="all">全部历史</option>
+            </select>
+          </label>
+          <label>
+            策略
+            <select id="strategySelect">
+              <option value="balanced" selected>均衡覆盖</option>
+              <option value="hot">热号偏向</option>
+              <option value="omission">遗漏回补</option>
+              <option value="cold">冷号逆向</option>
+              <option value="mixed">冷热混合</option>
+              <option value="random">纯随机</option>
+            </select>
+          </label>
+          <label>
+            投注方式
+            <select id="modeSelect">
+              <option value="single">单式 6+1</option>
+              <option value="complex" selected>复式</option>
+              <option value="dantuo">胆拖</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="control-grid" id="complexControls">
+          <label>
+            红球个数
+            <input id="redCount" type="number" min="6" max="12" value="7" />
+          </label>
+          <label>
+            蓝球个数
+            <input id="blueCount" type="number" min="1" max="6" value="2" />
+          </label>
+        </div>
+
+        <div class="control-grid hidden" id="dantuoControls">
+          <label>
+            胆码个数
+            <input id="danCount" type="number" min="1" max="5" value="2" />
+          </label>
+          <label>
+            拖码个数
+            <input id="tuoCount" type="number" min="4" max="15" value="8" />
+          </label>
+          <label>
+            蓝球个数
+            <input id="dtBlueCount" type="number" min="1" max="6" value="2" />
+          </label>
+        </div>
+
+        <div id="dantuoHelp" class="mode-help hidden">
+          <strong>胆拖玩法</strong>
+          <span>胆码是你最看好的红球，必须全部命中；拖码用于补足 6 个红球。注数 = C(拖码数, 6 - 胆码数) * 蓝球数。</span>
+        </div>
+
+        <div class="filter-controls">
+          <label class="checkline">
+            <input id="shapeFilter" type="checkbox" checked />
+            <span>组合形态过滤</span>
+          </label>
+          <label class="checkline">
+            <input id="avoidPopular" type="checkbox" checked />
+            <span>避开大众号码</span>
+          </label>
+        </div>
+
+        <div class="control-grid portfolio-controls">
+          <label>
+            备选组数
+            <input id="portfolioCount" type="number" min="1" max="8" value="3" />
+          </label>
+          <label>
+            组间最大重号
+            <input id="maxOverlap" type="number" min="0" max="5" value="2" />
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="generateBtn" type="button">生成推荐</button>
+          <button id="copyBtn" type="button" class="secondary">复制号码</button>
+        </div>
+      </section>
+
+      <section class="panel result" aria-label="推荐结果">
+        <div class="section-head">
+          <h2>推荐方案</h2>
+          <span id="strategyNote"></span>
+        </div>
+        <div id="recommendation" class="recommendation"></div>
+        <div id="metrics" class="metrics"></div>
+        <div id="qualityPanel" class="quality-panel"></div>
+        <div id="numberReasons" class="number-reasons"></div>
+        <div id="portfolioPanel" class="portfolio-panel"></div>
+      </section>
+
+      <section class="panel heat-panel red-panel" aria-label="红球走势">
+        <div class="section-head">
+          <h2>红球热度与遗漏</h2>
+          <span>频次越高越深，遗漏显示距离最近开奖期数</span>
+        </div>
+        <div id="redHeatmap" class="number-grid red-grid"></div>
+      </section>
+
+      <section class="panel heat-panel blue-panel" aria-label="蓝球走势">
+        <div class="section-head">
+          <h2>蓝球热度与遗漏</h2>
+          <span>蓝球影响小奖覆盖率</span>
+        </div>
+        <div id="blueHeatmap" class="number-grid blue-grid"></div>
+      </section>
+
+      <section class="panel wide" aria-label="历史策略分析">
+        <div class="section-head">
+          <h2>历史策略分析</h2>
+          <span>把开奖历史转成选号参考，不代表预测结果</span>
+        </div>
+        <div id="historyAnalysis" class="history-analysis"></div>
+      </section>
+
+      <section class="panel wide" aria-label="最近开奖走势">
+        <div class="section-head">
+          <h2>最近开奖走势</h2>
+          <span id="latestInfo"></span>
+        </div>
+        <div id="trendTable" class="trend-table"></div>
+      </section>
+
+      <section class="panel wide" aria-label="历史开奖">
+        <div class="section-head">
+          <h2>历史开奖</h2>
+          <span>每期只使用开奖前数据做回看</span>
+        </div>
+        <div id="drawList" class="draw-list"></div>
+      </section>
+    </main>
+
+    <script src="data/ssq-history.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
