@@ -294,7 +294,8 @@ button:hover {
 
 .quality-panel,
 .number-reasons,
-.portfolio-panel {
+.portfolio-panel,
+.strategy-compare {
   margin-top: 16px;
 }
 
@@ -320,6 +321,31 @@ button:hover {
 .quality-item span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.compare-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfcfe;
+}
+
+.compare-card strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 14px;
+}
+
+.compare-card span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .subhead {

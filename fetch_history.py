@@ -2,15 +2,15 @@
 """Fetch SSQ draw history and write browser-friendly data files.
 
 Usage:
-  python3 fetch_history.py --start 2026001 --end 2026064
-  python3 fetch_history.py --start 2026001
+  python3 fetch_history.py --start 2026001 --end 2026065
+  python3 fetch_history.py --months 6
 """
 
 from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 import json
 import re
 import ssl
@@ -24,11 +24,9 @@ BASE = "https://cp.china-ssq.net/ssq"
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 
-# 容忍证书校验失败（如宿主机时钟偏差导致证书"已过期"）时降级为不校验。
-# 该站点是公开开奖数据、无登录无敏感信息上行，降级仅影响传输校验。
-_INSECURE_CTX = ssl.create_default_context()
-_INSECURE_CTX.check_hostname = False
-_INSECURE_CTX.verify_mode = ssl.CERT_NONE
+INSECURE_CONTEXT = ssl.create_default_context()
+INSECURE_CONTEXT.check_hostname = False
+INSECURE_CONTEXT.verify_mode = ssl.CERT_NONE
 
 
 def fetch_text(url: str, timeout: int = 20) -> str:
@@ -37,13 +35,11 @@ def fetch_text(url: str, timeout: int = 20) -> str:
         with urlopen(req, timeout=timeout) as response:
             return response.read().decode("utf-8", "ignore")
     except (ssl.SSLError, URLError) as exc:
-        # URLError 可能包裹了 SSLError（如证书过期）；只在 SSL 相关时降级重试。
         reason = getattr(exc, "reason", exc)
         if not isinstance(exc, ssl.SSLError) and not isinstance(reason, ssl.SSLError):
             raise
-        with urlopen(req, timeout=timeout, context=_INSECURE_CTX) as response:
+        with urlopen(req, timeout=timeout, context=INSECURE_CONTEXT) as response:
             return response.read().decode("utf-8", "ignore")
-
 
 
 def detect_latest_issue() -> int:
@@ -82,6 +78,14 @@ def parse_issue(issue: int) -> dict[str, object]:
     return {"issue": str(issue), "date": date_match.group(1), "red": red, "blue": blue}
 
 
+def read_existing_rows() -> dict[int, dict[str, object]]:
+    path = DATA_DIR / "ssq-history.json"
+    if not path.exists():
+        return {}
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    return {int(row["issue"]): row for row in rows}
+
+
 def write_data(rows: list[dict[str, object]]) -> None:
     DATA_DIR.mkdir(exist_ok=True)
     payload = json.dumps(rows, ensure_ascii=False, indent=2)
@@ -90,19 +94,16 @@ def write_data(rows: list[dict[str, object]]) -> None:
 
 
 def cutoff_date(months: int) -> date:
-    """Return today minus N months (approximate, calendar-aware)."""
     today = date.today()
     year = today.year
     month = today.month - months
     while month <= 0:
         month += 12
         year -= 1
-    day = min(today.day, 28)  # avoid invalid dates like Feb 30
-    return date(year, month, day)
+    return date(year, month, min(today.day, 28))
 
 
 def prev_year_last_issue(year: int) -> int | None:
-    """Probe for the last issue number of the previous year by trying YYYY160 downward."""
     for seq in range(160, 100, -1):
         issue = year * 1000 + seq
         try:
@@ -114,7 +115,6 @@ def prev_year_last_issue(year: int) -> int | None:
 
 
 def prev_issue(issue: int) -> int | None:
-    """Return the issue right before `issue`, handling year rollover (e.g. 2026001 -> 2025xxx)."""
     seq = issue % 1000
     year = issue // 1000
     if seq > 1:
@@ -123,7 +123,6 @@ def prev_issue(issue: int) -> int | None:
 
 
 def parse_issue_with_retry(issue: int, sleep: float, attempts: int = 3) -> dict[str, object]:
-    """parse_issue with retries to tolerate transient network/SSL timeouts."""
     last_exc: Exception | None = None
     for attempt in range(attempts):
         try:
@@ -138,7 +137,6 @@ def parse_issue_with_retry(issue: int, sleep: float, attempts: int = 3) -> dict[
 
 
 def collect_recent_issues(months: int, latest: int, sleep: float) -> list[int]:
-    """Walk backward from `latest` until a draw older than the cutoff date is reached."""
     limit = cutoff_date(months)
     issues: list[int] = []
     current: int | None = latest
@@ -173,9 +171,12 @@ def main() -> None:
         issues = collect_recent_issues(args.months, latest, args.sleep)
         if not issues:
             raise SystemExit("滚动窗口内没有抓到任何开奖数据")
+        start = min(issues)
+        end = max(issues)
     else:
         end = args.end or detect_latest_issue()
         issues = list(range(args.start, end + 1))
+        start = args.start
 
     def fetch_with_retry(issue: int) -> tuple[int, dict[str, object] | None, str | None]:
         for attempt in range(3):
@@ -187,32 +188,33 @@ def main() -> None:
                 if attempt == 2:
                     return issue, None, str(exc)
                 time.sleep(1)
-
         return issue, None, "unknown error"
 
-    rows = []
+    existing = read_existing_rows()
+    rows_by_issue = dict(existing)
     failures = []
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
         futures = [executor.submit(fetch_with_retry, issue) for issue in issues]
         for future in as_completed(futures):
             issue, row, error = future.result()
             if row:
-                rows.append(row)
+                rows_by_issue[issue] = row
                 print(f"ok {issue}", flush=True)
+            elif issue in existing:
+                print(f"keep {issue}: {error}", flush=True)
             else:
                 failures.append((issue, error or "unknown error"))
                 print(f"fail {issue}: {error}", flush=True)
 
+    rows = [rows_by_issue[issue] for issue in sorted(rows_by_issue) if start <= issue <= end]
+
     if not rows:
         raise SystemExit("没有抓到任何开奖数据")
+    if failures:
+        raise SystemExit("部分新期号抓取失败，已保留旧数据但不会写入不完整结果")
 
-    rows.sort(key=lambda item: int(item["issue"]))
     write_data(rows)
     print(f"wrote {len(rows)} rows to {DATA_DIR / 'ssq-history.js'}")
-    if failures:
-        print("部分期号失败：")
-        for issue, message in failures:
-            print(f"  {issue}: {message}")
 
 
 if __name__ == "__main__":

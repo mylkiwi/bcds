@@ -11,10 +11,12 @@ WORKDIR /app
 
 # 静态页面烤进镜像
 COPY index.html styles.css app.js /usr/share/nginx/html/
+COPY data/ /usr/share/nginx/html/data/
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# 抓取脚本与定时任务
+# 抓取、中奖核验脚本与定时任务
 COPY fetch_history.py /app/fetch_history.py
+COPY check_winnings.py /app/check_winnings.py
 COPY crontab /etc/cron.d/ssq-fetch
 COPY entrypoint.sh /app/entrypoint.sh
 

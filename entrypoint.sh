@@ -9,15 +9,18 @@ if [ -f "/usr/share/zoneinfo/$TZ" ]; then
 fi
 echo "时区: $(date)"
 
-# 容器启动时在后台抓取一次，保证数据最新（不阻塞 nginx 启动，抓取期间页面用空数据兜底）
-echo "后台抓取最近 6 个月数据..."
+# 容器启动时在后台抓取并核验一次，保证数据和中奖结果尽量最新
+echo "后台抓取最近 6 个月数据并核验已购彩票..."
 (
-    cd /app && /usr/local/bin/python3 fetch_history.py --months 6 >> /var/log/fetch.log 2>&1 || \
-        echo "启动抓取失败，等待下次定时任务" >> /var/log/fetch.log
+    cd /app
+    /usr/local/bin/python3 fetch_history.py --months 6 >> /var/log/fetch.log 2>&1 || \
+        echo "启动抓取失败，继续尝试核验已有数据" >> /var/log/fetch.log
+    /usr/local/bin/python3 check_winnings.py >> /var/log/fetch.log 2>&1 || \
+        echo "启动核验失败，等待下次定时任务" >> /var/log/fetch.log
 ) &
 
-# 启动 cron（后台），定时任务：每周二/四/日 22:00 抓取
-echo "启动 cron，定时任务：每周二/四/日 22:00 抓取"
+# 启动 cron（后台），定时任务：每周二/四/日 22:00 抓取并核验
+echo "启动 cron，定时任务：每周二/四/日 22:00 抓取并核验"
 cron
 
 # 把抓取日志透传到容器日志（docker logs / docker compose logs）

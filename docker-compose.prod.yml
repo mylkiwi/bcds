@@ -10,4 +10,6 @@ services:
       - "8081:80"
     environment:
       TZ: Asia/Shanghai
+      BARK_KEY: L4T4PC2QxMzDf67obZ32eA
+      BARK_SOUND: minuet
     restart: unless-stopped

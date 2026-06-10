@@ -1,4 +1,4 @@
 # 双色球数据定时抓取：每周二(2)、四(4)、日(0) 22:00（北京时间）
-# 抓取最近 6 个月滚动窗口，写入 /app/data
-0 22 * * 2,4,0 root cd /app && /usr/local/bin/python3 fetch_history.py --months 6 >> /var/log/fetch.log 2>&1
+# 抓取最近 6 个月滚动窗口，写入 /app/data；随后核验已购彩票并在中奖时 Bark 推送
+0 22 * * 2,4,0 root cd /app && /usr/local/bin/python3 fetch_history.py --months 6 >> /var/log/fetch.log 2>&1; cd /app && /usr/local/bin/python3 check_winnings.py >> /var/log/fetch.log 2>&1
 # 文件末尾需保留一个空行

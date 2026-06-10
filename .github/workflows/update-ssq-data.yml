@@ -1,0 +1,42 @@
+name: Update SSQ Data
+
+on:
+  schedule:
+    - cron: "30 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch latest history
+        run: python fetch_history.py --start 2026001 --workers 8 --sleep 0
+
+      - name: Check recorded purchases
+        env:
+          BARK_KEY: L4T4PC2QxMzDf67obZ32eA
+          BARK_SOUND: minuet
+        run: python check_winnings.py
+
+      - name: Commit updated data and check results
+        run: |
+          git config user.name "ssq-data-bot"
+          git config user.email "ssq-data-bot@users.noreply.github.com"
+
+          if [ -n "$(git status --porcelain data/ssq-history.js data/ssq-history.json data/check-results.json)" ]; then
+            git add data/ssq-history.js data/ssq-history.json data/check-results.json
+            git commit -m "Update SSQ data and check results"
+            git push
+          else
+            echo "No data changes"
+          fi
