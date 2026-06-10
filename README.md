@@ -47,3 +47,46 @@ python3 -m http.server 8080
 低重叠组合池会按同一策略生成多组备选，并限制组间红球重复数量，适合多组投注时减少重复覆盖。蓝球策略会降低上期刚开蓝球的权重，并在多组方案之间尽量分散蓝球覆盖。
 
 逐期反推规则来自滚动历史对比：红球优先靠近 1-2 个前 30 期高频号、1-2 个久未出号、1-2 个上期附近号；蓝球优先一热一漏/一热一普通，并降低上期刚开蓝球。
+
+## 后台核奖和 Bark 推送
+
+已购彩票记录写在 `data/purchases.json`。普通复式示例：
+
+```json
+[
+  {
+    "id": "2026066-main",
+    "issue": "2026066",
+    "red": [1, 2, 10, 15, 28, 30, 33],
+    "blue": [10, 16],
+    "note": "6月11日主推 7+2"
+  }
+]
+```
+
+胆拖示例：
+
+```json
+[
+  {
+    "id": "2026066-dt",
+    "issue": "2026066",
+    "dan": [2, 30],
+    "tuo": [1, 10, 15, 22, 28, 31, 33, 12],
+    "blue": [10, 16],
+    "note": "胆拖示例"
+  }
+]
+```
+
+GitHub Actions 每天更新开奖后会运行 `check_winnings.py`，结果写入 `data/check-results.json`。如果中奖，会通过 Bark 推送。
+
+Bark key 不要写进仓库。到 GitHub 仓库设置：
+
+```text
+Settings -> Secrets and variables -> Actions -> New repository secret
+Name: BARK_KEY
+Value: 你的 Bark key
+```
+
+例如 Bark URL 是 `https://api.day.app/xxx/标题`，`BARK_KEY` 只填写中间的 `xxx`。
