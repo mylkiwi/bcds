@@ -12,6 +12,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import re
+import ssl
 import time
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -20,11 +21,12 @@ from urllib.request import Request, urlopen
 BASE = "https://cp.china-ssq.net/ssq"
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
+SSL_CONTEXT = ssl._create_unverified_context()
 
 
 def fetch_text(url: str, timeout: int = 20) -> str:
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen(req, timeout=timeout) as response:
+    with urlopen(req, timeout=timeout, context=SSL_CONTEXT) as response:
         return response.read().decode("utf-8", "ignore")
 
 
@@ -71,6 +73,14 @@ def write_data(rows: list[dict[str, object]]) -> None:
     (DATA_DIR / "ssq-history.js").write_text("window.SSQ_HISTORY = " + payload + ";\n", encoding="utf-8")
 
 
+def read_existing_rows() -> dict[int, dict[str, object]]:
+    path = DATA_DIR / "ssq-history.json"
+    if not path.exists():
+        return {}
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    return {int(row["issue"]): row for row in rows}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="抓取双色球历史开奖数据")
     parser.add_argument("--start", type=int, default=2026001, help="起始期号，例如 2026001")
@@ -95,23 +105,29 @@ def main() -> None:
 
         return issue, None, "unknown error"
 
-    rows = []
+    existing = read_existing_rows()
+    rows_by_issue = dict(existing)
     failures = []
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
         futures = [executor.submit(fetch_with_retry, issue) for issue in issues]
         for future in as_completed(futures):
             issue, row, error = future.result()
             if row:
-                rows.append(row)
+                rows_by_issue[issue] = row
                 print(f"ok {issue}", flush=True)
+            elif issue in existing:
+                print(f"keep {issue}: {error}", flush=True)
             else:
                 failures.append((issue, error or "unknown error"))
                 print(f"fail {issue}: {error}", flush=True)
 
+    rows = [rows_by_issue[issue] for issue in sorted(rows_by_issue) if args.start <= issue <= end]
+
     if not rows:
         raise SystemExit("没有抓到任何开奖数据")
+    if failures:
+        raise SystemExit("部分新期号抓取失败，已保留旧数据但不会写入不完整结果")
 
-    rows.sort(key=lambda item: int(item["issue"]))
     write_data(rows)
     print(f"wrote {len(rows)} rows to {DATA_DIR / 'ssq-history.js'}")
     if failures:
