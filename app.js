@@ -3,11 +3,12 @@
   const BLUE_MAX = 16;
   const TOTAL_SINGLE = comb(33, 6) * 16;
   const MODEL_WEIGHTS = {
-    dispersion: 0.4,
-    shape: 0.25,
-    crowd: 0.15,
+    dispersion: 0.35,
+    rule: 0.25,
+    shape: 0.2,
+    crowd: 0.1,
     blue: 0.1,
-    history: 0.1
+    history: 0
   };
   const history = normalizeHistory(window.SSQ_HISTORY || []);
 
@@ -32,6 +33,7 @@
     copyBtn: document.getElementById("copyBtn"),
     recommendation: document.getElementById("recommendation"),
     metrics: document.getElementById("metrics"),
+    strategyCompare: document.getElementById("strategyCompare"),
     qualityPanel: document.getElementById("qualityPanel"),
     numberReasons: document.getElementById("numberReasons"),
     portfolioPanel: document.getElementById("portfolioPanel"),
@@ -108,6 +110,7 @@
 
     renderRecommendation(scheme);
     renderMetrics(scheme);
+    renderStrategyCompare(scheme, scores);
     renderQuality(scheme);
     renderNumberReasons(scheme, stats);
     renderPortfolio(buildPortfolio(mode, scores, strategy, options, params, scheme));
@@ -219,10 +222,20 @@
   }
 
   function buildScores(stats, strategy) {
-    return {
-      red: scoreRange(RED_MAX, strategy, stats.redFreq, stats.redRecent, stats.redOmit),
-      blue: scoreRange(BLUE_MAX, strategy, stats.blueFreq, stats.blueRecent, stats.blueOmit)
+    const red = scoreRange(RED_MAX, strategy, stats.redFreq, stats.redRecent, stats.redOmit);
+    const blue = scoreRange(BLUE_MAX, strategy, stats.blueFreq, stats.blueRecent, stats.blueOmit);
+    const latest = history[history.length - 1];
+    const meta = {
+      hotRed: topEntries(stats.redFreq, 8, "desc").map(([n]) => n),
+      omitRed: topEntries(stats.redOmit, 8, "desc").map(([n]) => n),
+      latestRed: latest ? latest.red : [],
+      hotBlue: topEntries(stats.blueFreq, 4, "desc").map(([n]) => n),
+      omitBlue: topEntries(stats.blueOmit, 4, "desc").map(([n]) => n),
+      latestBlue: latest ? latest.blue : null
     };
+    red.__meta = meta;
+    blue.__meta = meta;
+    return { red, blue, meta };
   }
 
   function scoreRange(max, strategy, freq, recent, omit) {
@@ -390,21 +403,45 @@
   }
 
   function redQualityScore(nums, scoreMap, options) {
+    const meta = scoreMap.__meta || {};
     const historyScore = averageScore(nums, scoreMap);
     const shapeScoreValue = options.shapeFilter ? shapeQualityScore(nums) : 0.5;
     const crowdScore = options.avoidPopular ? 1 - Math.min(staticCrowdRiskScore(nums) / 2.5, 1) : 0.5;
+    const ruleScore = redRuleScore(nums, meta);
     return (
       MODEL_WEIGHTS.history * historyScore +
+      MODEL_WEIGHTS.rule * ruleScore +
       MODEL_WEIGHTS.shape * shapeScoreValue +
       MODEL_WEIGHTS.crowd * crowdScore
     );
   }
 
+  function redRuleScore(nums, meta) {
+    const hot = countOverlap(nums, meta.hotRed || []);
+    const omit = countOverlap(nums, meta.omitRed || []);
+    const repeat = countOverlap(nums, meta.latestRed || []);
+    const hotScore = rangeScore(hot, 1, 2, 4);
+    const omitScore = rangeScore(omit, 1, 2, 4);
+    const repeatScore = rangeScore(repeat, 1, 2, 4);
+    return clamp01(hotScore * 0.38 + omitScore * 0.38 + repeatScore * 0.24);
+  }
+
   function blueQualityScore(nums, scoreMap) {
+    const meta = scoreMap.__meta || {};
     const historyScore = averageScore(nums, scoreMap);
     const splitScore = nums.length > 1 ? blueSpreadScore(nums) : historyScore;
     const repeatPenalty = latestBluePenalty(nums);
-    return clamp01(historyScore * 0.55 + splitScore * 0.35 + repeatPenalty * 0.1);
+    const ruleScore = blueRuleScore(nums, meta);
+    return clamp01(historyScore * 0.25 + splitScore * 0.25 + repeatPenalty * 0.2 + ruleScore * 0.3);
+  }
+
+  function blueRuleScore(nums, meta) {
+    const hot = countOverlap(nums, meta.hotBlue || []);
+    const omit = countOverlap(nums, meta.omitBlue || []);
+    const latestRepeat = meta.latestBlue && nums.includes(meta.latestBlue) ? 1 : 0;
+    const hotScore = nums.length > 1 ? rangeScore(hot, 1, 1, nums.length) : rangeScore(hot, 0, 1, 1);
+    const omitScore = nums.length > 1 ? rangeScore(omit, 1, 1, nums.length) : rangeScore(omit, 0, 1, 1);
+    return clamp01(hotScore * 0.42 + omitScore * 0.42 + (latestRepeat ? 0 : 1) * 0.16);
   }
 
   function latestBluePenalty(nums) {
@@ -482,12 +519,12 @@
   function renderRecommendation(scheme) {
     const typeName = scheme.type === "dantuo" ? "胆拖" : scheme.type === "single" ? "单式" : "复式";
     const strategyNames = {
-      balanced: "均衡覆盖：综合频次、近期和遗漏，再过滤极端形态",
-      hot: "热号偏向：提高历史和近期高频号码权重",
-      omission: "遗漏回补：提高长时间未出的号码权重",
-      cold: "冷号逆向：倾向低频和长遗漏号码",
-      mixed: "冷热混合：热号、遗漏和随机扰动混合",
-      random: "纯随机：不使用走势权重，只做基本形态过滤"
+      balanced: "反推规则：1-2 高频、1-2 久未出、1-2 上期附近号，叠加形态过滤",
+      hot: "规则模型 + 高频倾斜：高频号更容易进入候选，但仍受反推区间约束",
+      omission: "规则模型 + 遗漏倾斜：久未出号更容易进入候选，但控制在 1-2 个",
+      cold: "规则模型 + 冷号倾斜：低频号补位，避免全冷组合",
+      mixed: "规则模型 + 冷热混合：热号、久未出号和随机扰动混合",
+      random: "规则模型 + 随机底池：随机生成候选，再按反推规则和形态筛选"
     };
     els.strategyNote.textContent = strategyNames[els.strategySelect.value];
 
@@ -516,6 +553,30 @@
       metricHtml("任意奖概率", `${(anyPrize * 100).toFixed(2)}%`, oneIn(anyPrize)),
       metricHtml("分奖风险", crowdRiskLabel(popularRiskScore(scheme.red)), "大众号码形态估计")
     ].join("");
+  }
+
+  function renderStrategyCompare(scheme, scores) {
+    const meta = scores.meta || {};
+    const hot = countOverlap(scheme.red, meta.hotRed || []);
+    const omit = countOverlap(scheme.red, meta.omitRed || []);
+    const repeat = countOverlap(scheme.red, meta.latestRed || []);
+    const blueHot = countOverlap(scheme.blue, meta.hotBlue || []);
+    const blueOmit = countOverlap(scheme.blue, meta.omitBlue || []);
+    const blueRepeat = meta.latestBlue && scheme.blue.includes(meta.latestBlue) ? 1 : 0;
+
+    els.strategyCompare.innerHTML = `
+      <div class="subhead"><h3>新旧策略对比</h3><span>基于逐期反推后的规则评分</span></div>
+      <div class="compare-grid">
+        <div class="compare-card">
+          <strong>旧策略</strong>
+          <span>偏平均历史权重：频次、近期、遗漏综合打分，容易继续追热号或遗漏号。</span>
+        </div>
+        <div class="compare-card">
+          <strong>新策略</strong>
+          <span>硬性靠近反推区间：红球 ${hot} 个高频、${omit} 个久未出、${repeat} 个上期重号；蓝球 ${blueHot} 热 / ${blueOmit} 漏 / ${blueRepeat ? "含上期蓝" : "避开上期蓝"}。</span>
+        </div>
+      </div>
+    `;
   }
 
   function renderQuality(scheme) {
@@ -763,6 +824,17 @@
   function averageScore(nums, scoreMap) {
     if (!nums.length) return 0;
     return clamp01(nums.reduce((sum, n) => sum + (scoreMap[n] || 0), 0) / nums.length);
+  }
+
+  function countOverlap(a, b) {
+    const set = new Set(b);
+    return a.filter((n) => set.has(n)).length;
+  }
+
+  function rangeScore(value, min, max, hardMax) {
+    if (value >= min && value <= max) return 1;
+    if (value < min) return clamp01(value / Math.max(1, min));
+    return clamp01(1 - (value - max) / Math.max(1, hardMax - max));
   }
 
   function clamp01(value) {
