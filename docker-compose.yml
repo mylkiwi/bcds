@@ -9,6 +9,7 @@ services:
       - "8081:80"
     environment:
       TZ: Asia/Shanghai
-      BARK_KEY: L4T4PC2QxMzDf67obZ32eA
-      BARK_SOUND: minuet
+      BARK_KEY: ${BARK_KEY}
+      BARK_SOUND: ${BARK_SOUND:-minuet}
+      SSQ_ADMIN_TOKEN: ${SSQ_ADMIN_TOKEN}
     restart: unless-stopped

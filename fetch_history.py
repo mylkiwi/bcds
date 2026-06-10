@@ -12,6 +12,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 import json
+import os
 import re
 import ssl
 import time
@@ -22,7 +23,7 @@ from urllib.request import Request, urlopen
 
 BASE = "https://cp.china-ssq.net/ssq"
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.environ.get("SSQ_PUBLIC_DATA_DIR", ROOT / "data"))
 
 INSECURE_CONTEXT = ssl.create_default_context()
 INSECURE_CONTEXT.check_hostname = False

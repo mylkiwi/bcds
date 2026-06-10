@@ -42,10 +42,28 @@
     blueHeatmap: document.getElementById("blueHeatmap"),
     trendTable: document.getElementById("trendTable"),
     drawList: document.getElementById("drawList"),
-    latestInfo: document.getElementById("latestInfo")
+    latestInfo: document.getElementById("latestInfo"),
+    adminToken: document.getElementById("adminToken"),
+    purchaseIssue: document.getElementById("purchaseIssue"),
+    purchaseMode: document.getElementById("purchaseMode"),
+    purchaseRed: document.getElementById("purchaseRed"),
+    purchaseBlue: document.getElementById("purchaseBlue"),
+    purchaseDan: document.getElementById("purchaseDan"),
+    purchaseTuo: document.getElementById("purchaseTuo"),
+    purchaseDtBlue: document.getElementById("purchaseDtBlue"),
+    purchaseNote: document.getElementById("purchaseNote"),
+    purchaseNormalFields: document.getElementById("purchaseNormalFields"),
+    purchaseDantuoFields: document.getElementById("purchaseDantuoFields"),
+    purchaseStatus: document.getElementById("purchaseStatus"),
+    purchaseList: document.getElementById("purchaseList"),
+    fillCurrentBtn: document.getElementById("fillCurrentBtn"),
+    savePurchaseBtn: document.getElementById("savePurchaseBtn"),
+    refreshPurchasesBtn: document.getElementById("refreshPurchasesBtn"),
+    checkNowBtn: document.getElementById("checkNowBtn")
   };
 
   let currentSchemeText = "";
+  let currentScheme = null;
 
   init();
 
@@ -63,6 +81,7 @@
     bindEvents();
     renderStaticViews();
     generate();
+    initPurchasePanel();
   }
 
   function bindEvents() {
@@ -84,6 +103,16 @@
       await navigator.clipboard.writeText(currentSchemeText);
       els.copyBtn.textContent = "已复制";
       window.setTimeout(() => (els.copyBtn.textContent = "复制号码"), 1200);
+    });
+
+    els.purchaseMode.addEventListener("change", togglePurchaseMode);
+    els.fillCurrentBtn.addEventListener("click", fillCurrentPurchase);
+    els.savePurchaseBtn.addEventListener("click", savePurchase);
+    els.refreshPurchasesBtn.addEventListener("click", loadPurchaseState);
+    els.checkNowBtn.addEventListener("click", checkNow);
+    els.adminToken.addEventListener("change", () => {
+      localStorage.setItem("ssqAdminToken", els.adminToken.value.trim());
+      loadPurchaseState();
     });
   }
 
@@ -514,6 +543,7 @@
   }
 
   function renderRecommendation(scheme) {
+    currentScheme = scheme;
     const typeName = scheme.type === "dantuo" ? "胆拖" : scheme.type === "single" ? "单式" : "复式";
     const strategyNames = {
       balanced: "反推规则：1-2 高频、1-2 久未出、1-2 上期附近号，叠加形态过滤",
@@ -644,6 +674,217 @@
       <div class="subhead"><h3>低重叠组合池</h3><span>多组投注时优先降低重复覆盖</span></div>
       <div class="portfolio-list">${cards}</div>
     `;
+  }
+
+  function initPurchasePanel() {
+    const savedToken = localStorage.getItem("ssqAdminToken") || "";
+    els.adminToken.value = savedToken;
+    els.purchaseIssue.value = nextIssue();
+    togglePurchaseMode();
+    if (savedToken) {
+      loadPurchaseState();
+    } else {
+      els.purchaseList.innerHTML = emptyPurchaseHtml("输入管理密钥后读取服务器购买记录");
+    }
+  }
+
+  function togglePurchaseMode() {
+    const dantuo = els.purchaseMode.value === "dantuo";
+    els.purchaseNormalFields.classList.toggle("hidden", dantuo);
+    els.purchaseDantuoFields.classList.toggle("hidden", !dantuo);
+  }
+
+  function fillCurrentPurchase() {
+    if (!currentScheme) return;
+    els.purchaseIssue.value = nextIssue();
+    if (currentScheme.type === "dantuo") {
+      els.purchaseMode.value = "dantuo";
+      togglePurchaseMode();
+      els.purchaseDan.value = formatNums(currentScheme.dantuo.dan);
+      els.purchaseTuo.value = formatNums(currentScheme.dantuo.tuo);
+      els.purchaseDtBlue.value = formatNums(currentScheme.blue);
+    } else {
+      els.purchaseMode.value = "complex";
+      togglePurchaseMode();
+      els.purchaseRed.value = formatNums(currentScheme.red);
+      els.purchaseBlue.value = formatNums(currentScheme.blue);
+    }
+    els.purchaseNote.value = currentSchemeText;
+  }
+
+  async function savePurchase() {
+    try {
+      const token = requireAdminToken();
+      const payload = buildPurchasePayload();
+      setPurchaseStatus("保存中...");
+      await apiFetch("/api/purchases", {
+        method: "POST",
+        token,
+        body: JSON.stringify(payload)
+      });
+      setPurchaseStatus("已保存，等待开奖后自动核验");
+      await loadPurchaseState();
+    } catch (error) {
+      setPurchaseStatus(error.message);
+    }
+  }
+
+  async function loadPurchaseState() {
+    try {
+      const token = requireAdminToken();
+      setPurchaseStatus("读取服务器记录...");
+      const state = await apiFetch("/api/state", { token });
+      renderPurchases(state.purchases || [], state.results || [], state.latest || null);
+      setPurchaseStatus(state.latest ? `服务器最新开奖 ${state.latest.issue}` : "已读取记录");
+    } catch (error) {
+      els.purchaseList.innerHTML = emptyPurchaseHtml("无法读取服务器购买记录");
+      setPurchaseStatus(error.message);
+    }
+  }
+
+  async function checkNow() {
+    try {
+      const token = requireAdminToken();
+      setPurchaseStatus("正在核奖...");
+      const result = await apiFetch("/api/check-now", { method: "POST", token });
+      if (!result.ok) {
+        throw new Error(result.stderr || result.stdout || "核奖失败");
+      }
+      setPurchaseStatus(result.stdout || "核奖完成");
+      await loadPurchaseState();
+    } catch (error) {
+      setPurchaseStatus(error.message);
+    }
+  }
+
+  async function deletePurchase(id) {
+    try {
+      const token = requireAdminToken();
+      await apiFetch(`/api/purchases/${encodeURIComponent(id)}`, { method: "DELETE", token });
+      setPurchaseStatus("已删除");
+      await loadPurchaseState();
+    } catch (error) {
+      setPurchaseStatus(error.message);
+    }
+  }
+
+  function buildPurchasePayload() {
+    const issue = els.purchaseIssue.value.trim();
+    const note = els.purchaseNote.value.trim();
+    if (!/^\d{7}$/.test(issue)) throw new Error("期号应为 7 位数字，例如 2026066");
+
+    if (els.purchaseMode.value === "dantuo") {
+      return {
+        issue,
+        type: "dantuo",
+        dan: parseNums(els.purchaseDan.value, 1, 33, "胆码"),
+        tuo: parseNums(els.purchaseTuo.value, 1, 33, "拖码"),
+        blue: parseNums(els.purchaseDtBlue.value, 1, 16, "蓝球"),
+        note
+      };
+    }
+
+    return {
+      issue,
+      type: "complex",
+      red: parseNums(els.purchaseRed.value, 1, 33, "红球"),
+      blue: parseNums(els.purchaseBlue.value, 1, 16, "蓝球"),
+      note
+    };
+  }
+
+  function renderPurchases(purchases, results, latest) {
+    if (!purchases.length) {
+      els.purchaseList.innerHTML = emptyPurchaseHtml("还没有保存过购买记录");
+      return;
+    }
+
+    const resultMap = new Map(results.map((item) => [`${item.purchase_id}:${item.issue}`, item]));
+    const cards = purchases.slice().reverse().map((purchase) => {
+      const result = resultMap.get(`${purchase.id}:${purchase.issue}`);
+      const status = purchaseStatusText(purchase, result, latest);
+      const numbers = purchase.type === "dantuo"
+        ? `胆:${formatNums(purchase.dan || [])} 拖:${formatNums(purchase.tuo || [])} 蓝:${formatNums(purchase.blue || [])}`
+        : `红:${formatNums(purchase.red || [])} 蓝:${formatNums(purchase.blue || [])}`;
+      const resultLine = result
+        ? `开奖号 ${formatNums(result.draw.red)} + ${pad(result.draw.blue)} ｜ ${resultSummary(result)}`
+        : "未产生核奖结果";
+      return `
+        <div class="purchase-card">
+          <div class="purchase-card-head">
+            <strong>${escapeHtml(purchase.issue)} · ${purchase.type === "dantuo" ? "胆拖" : "复式"}</strong>
+            <span class="purchase-state ${result && result.won ? "won" : ""}">${escapeHtml(status)}</span>
+          </div>
+          <p>${escapeHtml(numbers)}</p>
+          <p>${escapeHtml(resultLine)}</p>
+          ${purchase.note ? `<p class="purchase-note-text">${escapeHtml(purchase.note)}</p>` : ""}
+          <button type="button" class="link-btn" data-delete-purchase="${escapeHtml(purchase.id)}">删除</button>
+        </div>
+      `;
+    }).join("");
+
+    els.purchaseList.innerHTML = cards;
+    els.purchaseList.querySelectorAll("[data-delete-purchase]").forEach((btn) => {
+      btn.addEventListener("click", () => deletePurchase(btn.dataset.deletePurchase));
+    });
+  }
+
+  function purchaseStatusText(purchase, result, latest) {
+    if (result) {
+      return result.won ? `中奖，固定奖金约 ${result.fixed_amount} 元` : "已核验，未中奖";
+    }
+    if (latest && Number(latest.issue) >= Number(purchase.issue)) return "已开奖，待核验";
+    return "待开奖";
+  }
+
+  function resultSummary(result) {
+    const hits = Object.entries(result.counts || {})
+      .filter(([, count]) => count)
+      .map(([name, count]) => `${name}${count}注`);
+    return hits.length ? `${hits.join("，")}，固定奖金约 ${result.fixed_amount} 元` : "未中奖";
+  }
+
+  async function apiFetch(path, options = {}) {
+    const headers = {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${options.token}`
+    };
+    const response = await fetch(path, {
+      method: options.method || "GET",
+      headers,
+      body: options.body
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `请求失败 ${response.status}`);
+    return data;
+  }
+
+  function requireAdminToken() {
+    const token = els.adminToken.value.trim();
+    if (!token) throw new Error("请先输入管理密钥");
+    localStorage.setItem("ssqAdminToken", token);
+    return token;
+  }
+
+  function setPurchaseStatus(text) {
+    els.purchaseStatus.textContent = text;
+  }
+
+  function emptyPurchaseHtml(text) {
+    return `<div class="purchase-empty">${escapeHtml(text)}</div>`;
+  }
+
+  function parseNums(value, min, max, label) {
+    const nums = (value.match(/\d+/g) || []).map(Number).sort((a, b) => a - b);
+    if (!nums.length) throw new Error(`${label}不能为空`);
+    if (new Set(nums).size !== nums.length) throw new Error(`${label}不能重复`);
+    if (nums.some((n) => n < min || n > max)) throw new Error(`${label}范围应为 ${min}-${max}`);
+    return nums;
+  }
+
+  function nextIssue() {
+    const latest = history[history.length - 1];
+    return latest ? String(Number(latest.issue) + 1) : "";
   }
 
   function renderHistoryAnalysis(stats, scope) {

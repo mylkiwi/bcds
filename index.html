@@ -122,6 +122,75 @@
         <div id="portfolioPanel" class="portfolio-panel"></div>
       </section>
 
+      <section class="panel purchase-panel wide" aria-label="购买记录">
+        <div class="section-head">
+          <h2>购买记录</h2>
+          <span id="purchaseStatus">输入管理密钥后可保存和核奖</span>
+        </div>
+
+        <div class="purchase-shell">
+          <div class="purchase-form">
+            <div class="control-grid purchase-token-grid">
+              <label>
+                管理密钥
+                <input id="adminToken" type="password" autocomplete="current-password" placeholder="服务器 SSQ_ADMIN_TOKEN" />
+              </label>
+              <label>
+                期号
+                <input id="purchaseIssue" type="text" inputmode="numeric" placeholder="例如 2026066" />
+              </label>
+              <label>
+                类型
+                <select id="purchaseMode">
+                  <option value="complex" selected>单式/复式</option>
+                  <option value="dantuo">胆拖</option>
+                </select>
+              </label>
+            </div>
+
+            <div id="purchaseNormalFields" class="control-grid purchase-number-grid">
+              <label>
+                红球
+                <input id="purchaseRed" type="text" inputmode="numeric" placeholder="01 02 10 15 28 30 33" />
+              </label>
+              <label>
+                蓝球
+                <input id="purchaseBlue" type="text" inputmode="numeric" placeholder="10 16" />
+              </label>
+            </div>
+
+            <div id="purchaseDantuoFields" class="control-grid purchase-number-grid hidden">
+              <label>
+                胆码
+                <input id="purchaseDan" type="text" inputmode="numeric" placeholder="02 30" />
+              </label>
+              <label>
+                拖码
+                <input id="purchaseTuo" type="text" inputmode="numeric" placeholder="01 10 15 22 28 31 33 12" />
+              </label>
+              <label>
+                蓝球
+                <input id="purchaseDtBlue" type="text" inputmode="numeric" placeholder="10 16" />
+              </label>
+            </div>
+
+            <label class="purchase-note">
+              备注
+              <textarea id="purchaseNote" rows="2" placeholder="例如：6月11日主推 7+2"></textarea>
+            </label>
+
+            <div class="actions purchase-actions">
+              <button id="fillCurrentBtn" type="button" class="secondary">填入当前推荐</button>
+              <button id="savePurchaseBtn" type="button">保存购买记录</button>
+              <button id="refreshPurchasesBtn" type="button" class="secondary">刷新记录</button>
+              <button id="checkNowBtn" type="button" class="secondary">立即核奖</button>
+            </div>
+          </div>
+
+          <div id="purchaseList" class="purchase-list"></div>
+        </div>
+      </section>
+
       <section class="panel heat-panel red-panel" aria-label="红球走势">
         <div class="section-head">
           <h2>红球热度与遗漏</h2>

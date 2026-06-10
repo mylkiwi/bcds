@@ -65,7 +65,9 @@ python3 fetch_history.py --months 6
 python3 check_winnings.py
 ```
 
-抓取最近 6 个月的滚动窗口数据并刷新 `data/ssq-history.js`，随后核验 `data/purchases.json` 里的已购彩票，中奖时通过 Bark 推送。开奖时间约 21:15，官网公布有延迟，定到 22:00 以稳定抓到当天最新一期。容器启动时也会先在后台抓取并核验一次（不阻塞页面启动）。
+抓取最近 6 个月的滚动窗口数据并刷新公开历史数据，随后核验私有购买记录，中奖时通过 Bark 推送。开奖时间约 21:15，官网公布有延迟，定到 22:00 以稳定抓到当天最新一期。容器启动时也会先在后台抓取并核验一次（不阻塞页面启动）。
+
+容器同时启动一个本地购买记录 API，nginx 通过 `/api/` 反向代理给它。前端页面里的「购买记录」面板会调用这些接口。
 
 修改抓取时间编辑 `crontab` 后重建容器（方式 1 重新 `build`+`run`，方式 2/3 重新 `up`）。
 
@@ -121,7 +123,40 @@ docker rm -f ssq                                 # 方式 1
 
 ## 后台核奖和 Bark 推送
 
-已购彩票记录写在 `data/purchases.json`。普通复式示例：
+服务器部署后，已购彩票记录保存在容器私有目录：
+
+```text
+/app/private/purchases.json
+/app/private/check-results.json
+```
+
+公开给前端读取的只有历史开奖：
+
+```text
+/usr/share/nginx/html/data/ssq-history.js
+/usr/share/nginx/html/data/ssq-history.json
+```
+
+前端交互接口：
+
+```text
+GET    /api/state
+GET    /api/purchases
+GET    /api/check-results
+POST   /api/purchases
+DELETE /api/purchases/:id
+POST   /api/check-now
+```
+
+所有购买记录接口都需要管理密钥。部署环境变量：
+
+```text
+SSQ_ADMIN_TOKEN=你的管理密钥
+```
+
+页面会把你输入的管理密钥保存在浏览器 `localStorage`，请求时通过 `Authorization: Bearer <token>` 发给服务器。
+
+普通复式记录格式：
 
 ```json
 [
@@ -150,7 +185,7 @@ docker rm -f ssq                                 # 方式 1
 ]
 ```
 
-GitHub Actions 每天更新开奖后会运行 `check_winnings.py`，结果写入 `data/check-results.json`。Docker 容器也会在启动和每期开奖日 22:00 抓取后自动核验。如果中奖，会通过 Bark 推送。
+GitHub Actions 每天更新开奖后会运行 `check_winnings.py`。Docker 容器也会在启动和每期开奖日 22:00 抓取后自动核验。如果中奖，会通过 Bark 推送。
 
 当前部署分支的 `docker-compose.yml`、`docker-compose.prod.yml` 和 GitHub Actions 已配置 Bark 推送参数。要替换设备时，改 `BARK_KEY` 和 `BARK_SOUND` 后重新部署。
 

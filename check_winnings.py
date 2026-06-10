@@ -14,10 +14,11 @@ from urllib.request import urlopen
 
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
-HISTORY_PATH = DATA_DIR / "ssq-history.json"
-PURCHASES_PATH = DATA_DIR / "purchases.json"
-RESULTS_PATH = DATA_DIR / "check-results.json"
+PUBLIC_DATA_DIR = Path(os.environ.get("SSQ_PUBLIC_DATA_DIR", ROOT / "data"))
+PRIVATE_DATA_DIR = Path(os.environ.get("SSQ_PRIVATE_DATA_DIR", ROOT / "data"))
+HISTORY_PATH = Path(os.environ.get("SSQ_HISTORY_PATH", PUBLIC_DATA_DIR / "ssq-history.json"))
+PURCHASES_PATH = Path(os.environ.get("SSQ_PURCHASES_PATH", PRIVATE_DATA_DIR / "purchases.json"))
+RESULTS_PATH = Path(os.environ.get("SSQ_RESULTS_PATH", PRIVATE_DATA_DIR / "check-results.json"))
 
 FIXED_PRIZES = {
     "三等奖": 3000,
@@ -34,6 +35,7 @@ def read_json(path: Path, default):
 
 
 def write_json(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
