@@ -102,9 +102,10 @@ def check_purchase(purchase: dict, draw: dict) -> dict:
 
 
 def format_alert(result: dict) -> tuple[str, str]:
-    title = f"双色球中奖提醒 {result['issue']}"
+    won = result["won"]
+    title = f"双色球{'中奖' if won else '未中奖'}提醒 {result['issue']}"
     counts = result["counts"]
-    hits = "，".join(f"{name}{count}注" for name, count in counts.items() if count)
+    hits = "，".join(f"{name}{count}注" for name, count in counts.items() if count) or "未中奖"
     amount = result["fixed_amount"]
     red = " ".join(f"{n:02d}" for n in result["draw"]["red"])
     blue = f"{result['draw']['blue']:02d}"
@@ -150,8 +151,7 @@ def main() -> None:
         results.append(result)
         new_results.append(result)
         print(f"checked {purchase_id}: won={result['won']} amount={result['fixed_amount']}")
-        if result["won"]:
-            push_bark(result, args.dry_run)
+        push_bark(result, args.dry_run)
 
     write_json(RESULTS_PATH, results)
     print(f"new results: {len(new_results)}")
