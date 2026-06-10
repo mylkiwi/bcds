@@ -403,7 +403,14 @@
   function blueQualityScore(nums, scoreMap) {
     const historyScore = averageScore(nums, scoreMap);
     const splitScore = nums.length > 1 ? blueSpreadScore(nums) : historyScore;
-    return (historyScore * 0.65 + splitScore * 0.35);
+    const repeatPenalty = latestBluePenalty(nums);
+    return clamp01(historyScore * 0.55 + splitScore * 0.35 + repeatPenalty * 0.1);
+  }
+
+  function latestBluePenalty(nums) {
+    const latest = history[history.length - 1];
+    if (!latest) return 0.5;
+    return nums.includes(latest.blue) ? 0 : 1;
   }
 
   function blueSpreadScore(nums) {
@@ -420,13 +427,22 @@
     const dispersion = existingSchemes && existingSchemes.length
       ? dispersionQuality(scheme, existingSchemes)
       : 0.5;
-    return intrinsic + MODEL_WEIGHTS.dispersion * dispersion;
+    const blueDispersion = existingSchemes && existingSchemes.length
+      ? blueDispersionQuality(scheme, existingSchemes)
+      : 0.5;
+    return intrinsic + MODEL_WEIGHTS.dispersion * (dispersion * 0.8 + blueDispersion * 0.2);
   }
 
   function dispersionQuality(candidate, existingSchemes) {
     const maxOverlap = Math.max(...existingSchemes.map((scheme) => redOverlap(scheme.red, candidate.red)));
     const base = Math.max(6, Math.min(candidate.red.length, ...existingSchemes.map((scheme) => scheme.red.length)));
     return clamp01(1 - maxOverlap / base);
+  }
+
+  function blueDispersionQuality(candidate, existingSchemes) {
+    const used = new Set(existingSchemes.flatMap((scheme) => scheme.blue));
+    const repeats = candidate.blue.filter((n) => used.has(n)).length;
+    return clamp01(1 - repeats / Math.max(1, candidate.blue.length));
   }
 
   function popularRiskScore(nums) {
