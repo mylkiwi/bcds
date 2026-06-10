@@ -24,7 +24,7 @@ jobs:
 
       - name: Check recorded purchases
         env:
-          BARK_KEY: a7bc9a31f0c6e7f71feccc05663858e3b08befcd5c98a617ecbe31ae8e5a8a9a
+          BARK_KEY: L4T4PC2QxMzDf67obZ32eA
           BARK_SOUND: minuet
         run: python check_winnings.py
 
