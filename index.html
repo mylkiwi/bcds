@@ -162,7 +162,21 @@
       </section>
     </main>
 
-    <script src="data/ssq-history.js"></script>
-    <script src="app.js"></script>
+    <script>
+      const dataScript = document.createElement("script");
+      dataScript.src = "data/ssq-history.js?v=" + Date.now();
+      dataScript.onload = () => {
+        const appScript = document.createElement("script");
+        appScript.src = "app.js";
+        document.body.appendChild(appScript);
+      };
+      dataScript.onerror = () => {
+        window.SSQ_HISTORY = [];
+        const appScript = document.createElement("script");
+        appScript.src = "app.js";
+        document.body.appendChild(appScript);
+      };
+      document.body.appendChild(dataScript);
+    </script>
   </body>
 </html>
