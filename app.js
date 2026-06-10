@@ -717,13 +717,16 @@
       const token = requireAdminToken();
       const payload = buildPurchasePayload();
       setPurchaseStatus("保存中...");
-      await apiFetch("/api/purchases", {
+      const result = await apiFetch("/api/purchases", {
         method: "POST",
         token,
         body: JSON.stringify(payload)
       });
-      setPurchaseStatus("已保存，等待开奖后自动核验");
       await loadPurchaseState();
+      const notifyText = result.notification && result.notification.message
+        ? `；${result.notification.message}`
+        : "";
+      setPurchaseStatus(`已保存，等待开奖后自动核验${notifyText}`);
     } catch (error) {
       setPurchaseStatus(error.message);
     }
@@ -831,7 +834,12 @@
 
   function purchaseStatusText(purchase, result, latest) {
     if (result) {
-      return result.won ? `中奖，固定奖金约 ${result.fixed_amount} 元` : "已核验，未中奖";
+      if (!result.won) return "已核验，未中奖";
+      const floatingAmount = Number(result.floating_amount || 0);
+      const totalAmount = Number(result.total_amount || (Number(result.fixed_amount || 0) + floatingAmount));
+      return floatingAmount
+        ? `中奖，总奖金约 ${totalAmount} 元`
+        : `中奖，固定奖金约 ${result.fixed_amount} 元`;
     }
     if (latest && Number(latest.issue) >= Number(purchase.issue)) return "已开奖，待核验";
     return "待开奖";
@@ -841,7 +849,12 @@
     const hits = Object.entries(result.counts || {})
       .filter(([, count]) => count)
       .map(([name, count]) => `${name}${count}注`);
-    return hits.length ? `${hits.join("，")}，固定奖金约 ${result.fixed_amount} 元` : "未中奖";
+    if (!hits.length) return "未中奖";
+    const floatingAmount = Number(result.floating_amount || 0);
+    const totalAmount = Number(result.total_amount || (Number(result.fixed_amount || 0) + floatingAmount));
+    return floatingAmount
+      ? `${hits.join("，")}，总奖金约 ${totalAmount} 元（固定 ${result.fixed_amount} + 浮动 ${floatingAmount}）`
+      : `${hits.join("，")}，固定奖金约 ${result.fixed_amount} 元`;
   }
 
   async function apiFetch(path, options = {}) {

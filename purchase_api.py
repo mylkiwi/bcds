@@ -12,7 +12,8 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
+from urllib.request import urlopen
 
 
 ROOT = Path(__file__).resolve().parent
@@ -103,6 +104,44 @@ def latest_draw() -> dict | None:
     return rows[-1]
 
 
+def format_purchase_numbers(item: dict) -> str:
+    if item.get("type") == "dantuo":
+        dan = " ".join(f"{int(n):02d}" for n in item.get("dan", []))
+        tuo = " ".join(f"{int(n):02d}" for n in item.get("tuo", []))
+        blue = " ".join(f"{int(n):02d}" for n in item.get("blue", []))
+        return f"胆拖 胆:{dan} 拖:{tuo} 蓝:{blue}"
+    red = " ".join(f"{int(n):02d}" for n in item.get("red", []))
+    blue = " ".join(f"{int(n):02d}" for n in item.get("blue", []))
+    purchase_type = "单式" if item.get("type") == "single" else "复式"
+    return f"{purchase_type} 红:{red} 蓝:{blue}"
+
+
+def push_purchase_bark(item: dict) -> dict:
+    bark_key = os.environ.get("BARK_KEY", "").strip()
+    sound = os.environ.get("BARK_SOUND", "minuet").strip() or "minuet"
+    title = f"双色球新增购买 {item['issue']}"
+    body = f"{item['id']}：{format_purchase_numbers(item)}"
+    note = str(item.get("note", "")).strip()
+    if note:
+        body += f"。备注：{note}"
+
+    if not bark_key:
+        return {"sent": False, "message": "未配置 BARK_KEY，已跳过推送"}
+
+    url = f"https://api.day.app/{quote(bark_key)}/{quote(title)}/{quote(body)}?sound={quote(sound)}"
+    try:
+        with urlopen(url, timeout=20) as response:
+            payload = response.read().decode("utf-8", "ignore")
+        try:
+            parsed = json.loads(payload) if payload else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        message = parsed.get("message") if isinstance(parsed, dict) else ""
+        return {"sent": True, "message": message or "购买记录已推送"}
+    except Exception as exc:
+        return {"sent": False, "message": f"Bark 推送失败：{exc}"}
+
+
 def run_check() -> dict:
     env = os.environ.copy()
     process = subprocess.run(
@@ -189,7 +228,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         purchases.append(item)
         purchases.sort(key=lambda row: (str(row.get("issue", "")), str(row.get("id", ""))))
         write_json(PURCHASES_PATH, purchases)
-        self.write_response({"item": item})
+        self.write_response({"item": item, "notification": push_purchase_bark(item)})
 
     def delete_purchase(self, purchase_id: str) -> None:
         purchases = read_json(PURCHASES_PATH, [])

@@ -59,6 +59,13 @@ def strip_tags(html: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def extract_prize_row(text: str, prize_name: str, condition_pattern: str) -> dict[str, int] | None:
+    match = re.search(rf"{prize_name}\s+{condition_pattern}\s+(\d+)\s+(\d+)", text)
+    if not match:
+        return None
+    return {"winners": int(match.group(1)), "amount": int(match.group(2))}
+
+
 def parse_issue(issue: int) -> dict[str, object]:
     html = fetch_text(f"{BASE}/info/{issue}")
     text = strip_tags(html)
@@ -76,7 +83,23 @@ def parse_issue(issue: int) -> dict[str, object]:
     if sorted(red) != red or len(set(red)) != 6 or not all(1 <= n <= 33 for n in red) or not 1 <= blue <= 16:
         raise ValueError(f"{issue} 开奖号码范围异常: {numbers}")
 
-    return {"issue": str(issue), "date": date_match.group(1), "red": red, "blue": blue}
+    prize_rows = {}
+    for prize_name, condition_pattern in (("一等奖", r"6\s*\+\s*1"), ("二等奖", r"6\s*\+\s*0")):
+        row = extract_prize_row(text, prize_name, condition_pattern)
+        if row:
+            prize_rows[prize_name] = row
+
+    sale_match = re.search(r"本期全国销量：\s*([0-9.]+)\s*亿", text)
+    pool_match = re.search(r"奖池累积：\s*([0-9.]+)\s*亿", text)
+
+    result = {"issue": str(issue), "date": date_match.group(1), "red": red, "blue": blue}
+    if sale_match:
+        result["sales_yi"] = float(sale_match.group(1))
+    if pool_match:
+        result["pool_yi"] = float(pool_match.group(1))
+    if prize_rows:
+        result["prize_rows"] = prize_rows
+    return result
 
 
 def read_existing_rows() -> dict[int, dict[str, object]]:

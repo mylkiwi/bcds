@@ -72,13 +72,37 @@ def prize_name(red_hit: int, blue_hit: bool) -> str | None:
     return None
 
 
+def prize_amount(draw: dict, prize_name: str) -> int:
+    prize_rows = draw.get("prize_rows") or {}
+    row = prize_rows.get(prize_name) if isinstance(prize_rows, dict) else None
+    if not isinstance(row, dict):
+        return 0
+    amount = row.get("amount", 0)
+    return int(amount) if str(amount).isdigit() else 0
+
+
+def needs_refresh(existing_result: dict, draw: dict) -> bool:
+    if "floating_amount" not in existing_result or "total_amount" not in existing_result:
+        return True
+    if not draw.get("prize_rows"):
+        return False
+    counts = existing_result.get("counts") or {}
+    expected_floating = (
+        int(counts.get("一等奖", 0)) * prize_amount(draw, "一等奖")
+        + int(counts.get("二等奖", 0)) * prize_amount(draw, "二等奖")
+    )
+    existing_floating = int(existing_result.get("floating_amount") or 0)
+    existing_total = int(existing_result.get("total_amount") or 0)
+    fixed_amount = int(existing_result.get("fixed_amount") or 0)
+    return existing_floating != expected_floating or existing_total != fixed_amount + expected_floating
+
+
 def check_purchase(purchase: dict, draw: dict) -> dict:
     red_draw = set(normalize_nums(draw["red"]))
     blue_draw = int(draw["blue"])
     blue_nums = normalize_nums(purchase.get("blue", []))
     red_combos = expand_red_combos(purchase)
     counts = {"一等奖": 0, "二等奖": 0, "三等奖": 0, "四等奖": 0, "五等奖": 0, "六等奖": 0}
-    best = None
 
     for red_combo in red_combos:
         red_hit = len(set(red_combo) & red_draw)
@@ -86,30 +110,41 @@ def check_purchase(purchase: dict, draw: dict) -> dict:
             prize = prize_name(red_hit, blue == blue_draw)
             if prize:
                 counts[prize] += 1
-                best = best or prize
 
-    amount = sum(counts[name] * amount for name, amount in FIXED_PRIZES.items())
+    fixed_amount = sum(counts[name] * amount for name, amount in FIXED_PRIZES.items())
+    floating_amount = (
+        counts["一等奖"] * prize_amount(draw, "一等奖")
+        + counts["二等奖"] * prize_amount(draw, "二等奖")
+    )
     return {
         "purchase_id": purchase["id"],
         "issue": str(purchase["issue"]),
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "draw": {"red": normalize_nums(draw["red"]), "blue": blue_draw},
         "counts": counts,
-        "fixed_amount": amount,
+        "fixed_amount": fixed_amount,
+        "floating_amount": floating_amount,
+        "total_amount": fixed_amount + floating_amount,
         "won": any(counts.values()),
         "note": purchase.get("note", ""),
     }
 
 
 def format_alert(result: dict) -> tuple[str, str]:
-    won = result["won"]
-    title = f"双色球{'中奖' if won else '未中奖'}提醒 {result['issue']}"
+    title = f"双色球{'中奖' if result['won'] else '未中奖'}提醒 {result['issue']}"
     counts = result["counts"]
     hits = "，".join(f"{name}{count}注" for name, count in counts.items() if count) or "未中奖"
-    amount = result["fixed_amount"]
+    fixed_amount = int(result["fixed_amount"])
+    floating_amount = int(result.get("floating_amount") or 0)
+    total_amount = int(result.get("total_amount") or fixed_amount + floating_amount)
     red = " ".join(f"{n:02d}" for n in result["draw"]["red"])
     blue = f"{result['draw']['blue']:02d}"
-    body = f"{result['purchase_id']}：{hits}。固定奖金约 {amount} 元。开奖号：{red} + {blue}"
+    amount_line = (
+        f"总奖金约 {total_amount} 元（固定 {fixed_amount} + 浮动 {floating_amount}）"
+        if floating_amount
+        else f"固定奖金约 {fixed_amount} 元"
+    )
+    body = f"{result['purchase_id']}：{hits}。{amount_line}。开奖号：{red} + {blue}"
     return title, body
 
 
@@ -135,26 +170,37 @@ def main() -> None:
     history = {str(row["issue"]): row for row in read_json(HISTORY_PATH, [])}
     purchases = read_json(PURCHASES_PATH, [])
     results = read_json(RESULTS_PATH, [])
-    checked = {(item["purchase_id"], str(item["issue"])) for item in results}
+    result_index = {(item["purchase_id"], str(item["issue"])): idx for idx, item in enumerate(results)}
     new_results = []
+    updated_results = []
 
     for purchase in purchases:
         purchase_id = purchase["id"]
         issue = str(purchase["issue"])
-        if (purchase_id, issue) in checked:
-            continue
         if issue not in history:
             print(f"skip {purchase_id}: issue {issue} not drawn yet")
             continue
 
+        key = (purchase_id, issue)
+        existing_idx = result_index.get(key)
+        if existing_idx is not None and not needs_refresh(results[existing_idx], history[issue]):
+            continue
+
         result = check_purchase(purchase, history[issue])
-        results.append(result)
-        new_results.append(result)
-        print(f"checked {purchase_id}: won={result['won']} amount={result['fixed_amount']}")
-        push_bark(result, args.dry_run)
+        if existing_idx is None:
+            results.append(result)
+            result_index[key] = len(results) - 1
+            new_results.append(result)
+            print(f"checked {purchase_id}: won={result['won']} total_amount={result['total_amount']}")
+            push_bark(result, args.dry_run)
+        else:
+            results[existing_idx] = result
+            updated_results.append(result)
+            print(f"refreshed {purchase_id}: won={result['won']} total_amount={result['total_amount']}")
 
     write_json(RESULTS_PATH, results)
     print(f"new results: {len(new_results)}")
+    print(f"updated results: {len(updated_results)}")
 
 
 if __name__ == "__main__":
