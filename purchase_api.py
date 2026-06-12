@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 from urllib.request import urlopen
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parent
@@ -22,6 +23,7 @@ PRIVATE_DATA_DIR = Path(os.environ.get("SSQ_PRIVATE_DATA_DIR", ROOT / "data"))
 HISTORY_PATH = Path(os.environ.get("SSQ_HISTORY_PATH", PUBLIC_DATA_DIR / "ssq-history.json"))
 PURCHASES_PATH = Path(os.environ.get("SSQ_PURCHASES_PATH", PRIVATE_DATA_DIR / "purchases.json"))
 RESULTS_PATH = Path(os.environ.get("SSQ_RESULTS_PATH", PRIVATE_DATA_DIR / "check-results.json"))
+DISPLAY_TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 
 
 def read_json(path: Path, default):
@@ -104,26 +106,47 @@ def latest_draw() -> dict | None:
     return rows[-1]
 
 
-def format_purchase_numbers(item: dict) -> str:
+def format_local_time(value: str) -> str:
+    text = str(value).strip()
+    if not text:
+        return datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_num_line(label: str, values: list[int]) -> str:
+    nums = " ".join(f"{int(n):02d}" for n in values)
+    return f"{label}{nums}"
+
+
+def build_purchase_body(item: dict) -> str:
+    purchase_type = {"single": "单式", "complex": "复式", "dantuo": "胆拖"}.get(item.get("type"), "复式")
+    lines = [
+        f"时间：{format_local_time(item.get('created_at', ''))}",
+        f"类型：{purchase_type}",
+    ]
     if item.get("type") == "dantuo":
-        dan = " ".join(f"{int(n):02d}" for n in item.get("dan", []))
-        tuo = " ".join(f"{int(n):02d}" for n in item.get("tuo", []))
-        blue = " ".join(f"{int(n):02d}" for n in item.get("blue", []))
-        return f"胆拖 胆:{dan} 拖:{tuo} 蓝:{blue}"
-    red = " ".join(f"{int(n):02d}" for n in item.get("red", []))
-    blue = " ".join(f"{int(n):02d}" for n in item.get("blue", []))
-    purchase_type = "单式" if item.get("type") == "single" else "复式"
-    return f"{purchase_type} 红:{red} 蓝:{blue}"
+        lines.append(format_num_line("🔴胆码：", item.get("dan", [])))
+        lines.append(format_num_line("🔴拖码：", item.get("tuo", [])))
+    else:
+        lines.append(format_num_line("🔴红球：", item.get("red", [])))
+    lines.append(format_num_line("🔵蓝球：", item.get("blue", [])))
+    note = str(item.get("note", "")).strip()
+    if note:
+        lines.append(f"备注：{note}")
+    return "\n".join(lines)
 
 
 def push_purchase_bark(item: dict) -> dict:
     bark_key = os.environ.get("BARK_KEY", "").strip()
     sound = os.environ.get("BARK_SOUND", "minuet").strip() or "minuet"
     title = f"双色球新增购买 {item['issue']}"
-    body = f"{item['id']}：{format_purchase_numbers(item)}"
-    note = str(item.get("note", "")).strip()
-    if note:
-        body += f"。备注：{note}"
+    body = build_purchase_body(item)
 
     if not bark_key:
         return {"sent": False, "message": "未配置 BARK_KEY，已跳过推送"}

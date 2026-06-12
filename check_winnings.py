@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 from urllib.request import urlopen
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parent
@@ -19,6 +20,7 @@ PRIVATE_DATA_DIR = Path(os.environ.get("SSQ_PRIVATE_DATA_DIR", ROOT / "data"))
 HISTORY_PATH = Path(os.environ.get("SSQ_HISTORY_PATH", PUBLIC_DATA_DIR / "ssq-history.json"))
 PURCHASES_PATH = Path(os.environ.get("SSQ_PURCHASES_PATH", PRIVATE_DATA_DIR / "purchases.json"))
 RESULTS_PATH = Path(os.environ.get("SSQ_RESULTS_PATH", PRIVATE_DATA_DIR / "check-results.json"))
+DISPLAY_TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 
 FIXED_PRIZES = {
     "三等奖": 3000,
@@ -130,6 +132,24 @@ def check_purchase(purchase: dict, draw: dict) -> dict:
     }
 
 
+def format_local_time(value: str) -> str:
+    text = str(value).strip()
+    if not text:
+        return datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_num_line(label: str, values: list[int]) -> str:
+    nums = " ".join(f"{int(n):02d}" for n in values)
+    return f"{label}{nums}"
+
+
 def format_alert(result: dict) -> tuple[str, str]:
     title = f"双色球{'中奖' if result['won'] else '未中奖'}提醒 {result['issue']}"
     counts = result["counts"]
@@ -137,14 +157,20 @@ def format_alert(result: dict) -> tuple[str, str]:
     fixed_amount = int(result["fixed_amount"])
     floating_amount = int(result.get("floating_amount") or 0)
     total_amount = int(result.get("total_amount") or fixed_amount + floating_amount)
-    red = " ".join(f"{n:02d}" for n in result["draw"]["red"])
-    blue = f"{result['draw']['blue']:02d}"
-    amount_line = (
-        f"总奖金约 {total_amount} 元（固定 {fixed_amount} + 浮动 {floating_amount}）"
-        if floating_amount
-        else f"固定奖金约 {fixed_amount} 元"
-    )
-    body = f"{result['purchase_id']}：{hits}。{amount_line}。开奖号：{red} + {blue}"
+    amount_line = f"奖金：总约 {total_amount} 元（固定 {fixed_amount} + 浮动 {floating_amount}）"
+    if not floating_amount:
+        amount_line = f"奖金：固定约 {fixed_amount} 元"
+    lines = [
+        f"时间：{format_local_time(result.get('checked_at', ''))}",
+        f"结果：{hits}",
+        amount_line,
+        format_num_line("🔴红球：", result["draw"]["red"]),
+        format_num_line("🔵蓝球：", [result["draw"]["blue"]]),
+    ]
+    note = str(result.get("note", "")).strip()
+    if note:
+        lines.append(f"备注：{note}")
+    body = "\n".join(lines)
     return title, body
 
 
