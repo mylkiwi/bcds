@@ -138,7 +138,7 @@ def build_purchase_body(item: dict) -> str:
     lines.append(format_num_line("蓝球：", item.get("blue", [])))
     note = str(item.get("note", "")).strip()
     if note:
-        lines.append(f"祝福：{note}")
+        lines.append(f"{note}")
     return "\n".join(lines)
 
 

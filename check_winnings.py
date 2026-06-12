@@ -169,7 +169,7 @@ def format_alert(result: dict) -> tuple[str, str]:
     ]
     note = str(result.get("note", "")).strip()
     if note:
-        lines.append(f"祝福：{note}")
+        lines.append(f"{note}")
     body = "\n".join(lines)
     return title, body
 
