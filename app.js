@@ -807,10 +807,10 @@
       const result = resultMap.get(`${purchase.id}:${purchase.issue}`);
       const status = purchaseStatusText(purchase, result, latest);
       const numbers = purchase.type === "dantuo"
-        ? `胆:${formatNums(purchase.dan || [])} 拖:${formatNums(purchase.tuo || [])} 蓝:${formatNums(purchase.blue || [])}`
-        : `红:${formatNums(purchase.red || [])} 蓝:${formatNums(purchase.blue || [])}`;
+        ? `${labelHtml("红球胆码", "red")} ${escapeHtml(formatNums(purchase.dan || []))} ${labelHtml("红球拖码", "red")} ${escapeHtml(formatNums(purchase.tuo || []))} ${labelHtml("蓝球", "blue")} ${escapeHtml(formatNums(purchase.blue || []))}`
+        : `${labelHtml("红球", "red")} ${escapeHtml(formatNums(purchase.red || []))} ${labelHtml("蓝球", "blue")} ${escapeHtml(formatNums(purchase.blue || []))}`;
       const resultLine = result
-        ? `开奖号 ${formatNums(result.draw.red)} + ${pad(result.draw.blue)} ｜ ${resultSummary(result)}`
+        ? `${labelHtml("开奖号码", "neutral")} ${labelHtml("红球", "red")} ${escapeHtml(formatNums(result.draw.red))} ${labelHtml("蓝球", "blue")} ${escapeHtml(pad(result.draw.blue))} ｜ ${escapeHtml(resultSummary(result))}`
         : "未产生核奖结果";
       return `
         <div class="purchase-card">
@@ -818,9 +818,9 @@
             <strong>${escapeHtml(purchase.issue)} · ${purchase.type === "dantuo" ? "胆拖" : "复式"}</strong>
             <span class="purchase-state ${result && result.won ? "won" : ""}">${escapeHtml(status)}</span>
           </div>
-          <p>${escapeHtml(numbers)}</p>
-          <p>${escapeHtml(resultLine)}</p>
-          ${purchase.note ? `<p class="purchase-note-text">${escapeHtml(purchase.note)}</p>` : ""}
+          <p>${numbers}</p>
+          <p>${resultLine}</p>
+          ${purchase.note ? `<p class="purchase-note-text"><span class="blessing-label">祝福</span>${escapeHtml(purchase.note)}</p>` : ""}
           <button type="button" class="link-btn" data-delete-purchase="${escapeHtml(purchase.id)}">删除</button>
         </div>
       `;
@@ -830,6 +830,11 @@
     els.purchaseList.querySelectorAll("[data-delete-purchase]").forEach((btn) => {
       btn.addEventListener("click", () => deletePurchase(btn.dataset.deletePurchase));
     });
+  }
+
+  function labelHtml(text, tone) {
+    const klass = tone === "red" ? "inline-label red-text" : tone === "blue" ? "inline-label blue-text" : "inline-label";
+    return `<span class="${klass}">${escapeHtml(text)}：</span>`;
   }
 
   function purchaseStatusText(purchase, result, latest) {

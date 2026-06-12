@@ -52,11 +52,11 @@
 
         <div class="control-grid" id="complexControls">
           <label>
-            红球个数
+            <span class="red-text">红球个数</span>
             <input id="redCount" type="number" min="6" max="12" value="7" />
           </label>
           <label>
-            蓝球个数
+            <span class="blue-text">蓝球个数</span>
             <input id="blueCount" type="number" min="1" max="6" value="2" />
           </label>
         </div>
@@ -71,14 +71,14 @@
             <input id="tuoCount" type="number" min="4" max="15" value="8" />
           </label>
           <label>
-            蓝球个数
+            <span class="blue-text">蓝球个数</span>
             <input id="dtBlueCount" type="number" min="1" max="6" value="2" />
           </label>
         </div>
 
         <div id="dantuoHelp" class="mode-help hidden">
           <strong>胆拖玩法</strong>
-          <span>胆码是你最看好的红球，必须全部命中；拖码用于补足 6 个红球。注数 = C(拖码数, 6 - 胆码数) * 蓝球数。</span>
+          <span>胆码是你最看好的<span class="red-text">红球</span>，必须全部命中；拖码用于补足 6 个<span class="red-text">红球</span>。注数 = C(拖码数, 6 - 胆码数) * <span class="blue-text">蓝球</span>数。</span>
         </div>
 
         <div class="filter-controls">
@@ -150,11 +150,11 @@
 
             <div id="purchaseNormalFields" class="control-grid purchase-number-grid">
               <label>
-                红球
+                <span class="red-text">红球</span>
                 <input id="purchaseRed" type="text" inputmode="numeric" placeholder="01 02 10 15 28 30 33" />
               </label>
               <label>
-                蓝球
+                <span class="blue-text">蓝球</span>
                 <input id="purchaseBlue" type="text" inputmode="numeric" placeholder="10 16" />
               </label>
             </div>
@@ -169,14 +169,14 @@
                 <input id="purchaseTuo" type="text" inputmode="numeric" placeholder="01 10 15 22 28 31 33 12" />
               </label>
               <label>
-                蓝球
+                <span class="blue-text">蓝球</span>
                 <input id="purchaseDtBlue" type="text" inputmode="numeric" placeholder="10 16" />
               </label>
             </div>
 
             <label class="purchase-note">
-              备注
-              <textarea id="purchaseNote" rows="2" placeholder="例如：6月11日主推 7+2"></textarea>
+              祝福
+              <textarea id="purchaseNote" rows="2" placeholder="例如：好运常在，今晚收获惊喜"></textarea>
             </label>
 
             <div class="actions purchase-actions">
@@ -193,7 +193,7 @@
 
       <section class="panel heat-panel red-panel" aria-label="红球走势">
         <div class="section-head">
-          <h2>红球热度与遗漏</h2>
+          <h2><span class="red-text">红球</span>热度与遗漏</h2>
           <span>频次越高越深，遗漏显示距离最近开奖期数</span>
         </div>
         <div id="redHeatmap" class="number-grid red-grid"></div>
@@ -201,8 +201,8 @@
 
       <section class="panel heat-panel blue-panel" aria-label="蓝球走势">
         <div class="section-head">
-          <h2>蓝球热度与遗漏</h2>
-          <span>蓝球影响小奖覆盖率</span>
+          <h2><span class="blue-text">蓝球</span>热度与遗漏</h2>
+          <span><span class="blue-text">蓝球</span>影响小奖覆盖率</span>
         </div>
         <div id="blueHeatmap" class="number-grid blue-grid"></div>
       </section>

@@ -164,12 +164,12 @@ def format_alert(result: dict) -> tuple[str, str]:
         f"时间：{format_local_time(result.get('checked_at', ''))}",
         f"结果：{hits}",
         amount_line,
-        format_num_line("🔴红球：", result["draw"]["red"]),
-        format_num_line("🔵蓝球：", [result["draw"]["blue"]]),
+        format_num_line("红球：", result["draw"]["red"]),
+        format_num_line("蓝球：", [result["draw"]["blue"]]),
     ]
     note = str(result.get("note", "")).strip()
     if note:
-        lines.append(f"备注：{note}")
+        lines.append(f"祝福：{note}")
     body = "\n".join(lines)
     return title, body
 

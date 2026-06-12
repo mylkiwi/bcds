@@ -131,14 +131,14 @@ def build_purchase_body(item: dict) -> str:
         f"类型：{purchase_type}",
     ]
     if item.get("type") == "dantuo":
-        lines.append(format_num_line("🔴胆码：", item.get("dan", [])))
-        lines.append(format_num_line("🔴拖码：", item.get("tuo", [])))
+        lines.append(format_num_line("红球胆码：", item.get("dan", [])))
+        lines.append(format_num_line("红球拖码：", item.get("tuo", [])))
     else:
-        lines.append(format_num_line("🔴红球：", item.get("red", [])))
-    lines.append(format_num_line("🔵蓝球：", item.get("blue", [])))
+        lines.append(format_num_line("红球：", item.get("red", [])))
+    lines.append(format_num_line("蓝球：", item.get("blue", [])))
     note = str(item.get("note", "")).strip()
     if note:
-        lines.append(f"备注：{note}")
+        lines.append(f"祝福：{note}")
     return "\n".join(lines)
 
 

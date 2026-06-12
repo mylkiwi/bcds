@@ -425,6 +425,19 @@ button:hover {
   gap: 6px;
 }
 
+.red-text {
+  color: var(--red);
+}
+
+.blue-text {
+  color: var(--blue);
+}
+
+.inline-label {
+  color: var(--muted);
+  font-weight: 600;
+}
+
 .purchase-actions {
   flex-wrap: wrap;
 }
@@ -479,6 +492,13 @@ button:hover {
 
 .purchase-note-text {
   color: var(--muted) !important;
+}
+
+.blessing-label {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--green);
+  font-weight: 600;
 }
 
 .link-btn {
