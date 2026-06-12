@@ -151,7 +151,7 @@ def format_num_line(label: str, values: list[int]) -> str:
 
 
 def format_alert(result: dict) -> tuple[str, str]:
-    title = f"双色球{'中奖' if result['won'] else '未中奖'}提醒 {result['issue']}"
+    title = f"核奖结果 {result['issue']}"
     counts = result["counts"]
     hits = "，".join(f"{name}{count}注" for name, count in counts.items() if count) or "未中奖"
     fixed_amount = int(result["fixed_amount"])

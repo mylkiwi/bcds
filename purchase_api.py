@@ -145,7 +145,7 @@ def build_purchase_body(item: dict) -> str:
 def push_purchase_bark(item: dict) -> dict:
     bark_key = os.environ.get("BARK_KEY", "").strip()
     sound = os.environ.get("BARK_SOUND", "minuet").strip() or "minuet"
-    title = f"双色球新增购买 {item['issue']}"
+    title = f"新增购买 {item['issue']}"
     body = build_purchase_body(item)
 
     if not bark_key:
