@@ -1,6 +1,9 @@
 (function () {
   const RED_MAX = 33;
   const BLUE_MAX = 16;
+  const BLUE_BASE_PROBABILITY = 1 / BLUE_MAX;
+  const BLUE_SIGNAL_MIN = 0.25;
+  const BLUE_STAR_Z = 2;
   const TOTAL_SINGLE = comb(33, 6) * 16;
   const MODEL_WEIGHTS = {
     dispersion: 0.4,
@@ -246,12 +249,13 @@
       blueOmit[n] = omission(allRows, (row) => row.blue === n);
     }
 
-    return { redFreq, blueFreq, redRecent, blueRecent, redOmit, blueOmit, scopeSize: scope.length };
+    return { redFreq, blueFreq, redRecent, blueRecent, redOmit, blueOmit, scopeSize: scope.length, recentSize: recentRows.length };
   }
 
   function buildScores(stats, strategy) {
     const red = scoreRange(RED_MAX, strategy, stats.redFreq, stats.redRecent, stats.redOmit);
-    const blue = scoreRange(BLUE_MAX, strategy, stats.blueFreq, stats.blueRecent, stats.blueOmit);
+    const blueSignals = buildBlueSignals(stats);
+    const blue = scoreBlueRange(stats, strategy, blueSignals);
     const latest = history[history.length - 1];
     const meta = {
       hotRed: topEntries(stats.redFreq, 8, "desc").map(([n]) => n),
@@ -259,11 +263,67 @@
       latestRed: latest ? latest.red : [],
       hotBlue: topEntries(stats.blueFreq, 4, "desc").map(([n]) => n),
       omitBlue: topEntries(stats.blueOmit, 4, "desc").map(([n]) => n),
+      signalBlue: topBlueSignals(blueSignals, 4).map(([n]) => n),
+      starBlue: starBlueSignals(blueSignals),
+      blueSignals,
       latestBlue: latest ? latest.blue : null
     };
     red.__meta = meta;
     blue.__meta = meta;
     return { red, blue, meta };
+  }
+
+  function buildBlueSignals(stats) {
+    const result = {};
+    const scopeSize = Math.max(1, stats.scopeSize || 0);
+    const recentSize = Math.max(1, stats.recentSize || 0);
+
+    for (let n = 1; n <= BLUE_MAX; n++) {
+      const freqZ = binomialZ(stats.blueFreq[n] || 0, scopeSize, BLUE_BASE_PROBABILITY);
+      const recentZ = binomialZ(stats.blueRecent[n] || 0, recentSize, BLUE_BASE_PROBABILITY);
+      const hotEvidence = clamp01(Math.max(0, freqZ) / 3 * 0.65 + Math.max(0, recentZ) / 3 * 0.35);
+      const coldEvidence = clamp01(Math.max(0, -freqZ) / 3 * 0.65 + Math.max(0, -recentZ) / 3 * 0.35);
+      const omissionTail = clamp01(1 - Math.pow(1 - BLUE_BASE_PROBABILITY, stats.blueOmit[n] || 0));
+
+      result[n] = {
+        freqZ,
+        recentZ,
+        hotEvidence,
+        coldEvidence,
+        omissionTail,
+        starred: freqZ >= BLUE_STAR_Z || (freqZ >= 1.5 && recentZ >= 1.5)
+      };
+    }
+
+    return result;
+  }
+
+  function scoreBlueRange(stats, strategy, signals) {
+    const result = {};
+
+    for (let n = 1; n <= BLUE_MAX; n++) {
+      const signal = signals[n];
+      const jitter = Math.random();
+      let score;
+
+      if (strategy === "random") {
+        score = jitter;
+      } else if (strategy === "hot") {
+        score = 0.58 + signal.hotEvidence * 0.18 + Math.max(0, signal.recentZ) / 3 * 0.06 + jitter * 0.02;
+      } else if (strategy === "cold") {
+        score = 0.58 + signal.coldEvidence * 0.08 + signal.omissionTail * 0.02 + jitter * 0.02;
+      } else if (strategy === "omission") {
+        score = 0.58 + signal.hotEvidence * 0.08 + signal.omissionTail * 0.02 + jitter * 0.02;
+      } else if (strategy === "mixed") {
+        score = 0.56 + signal.hotEvidence * 0.08 + signal.coldEvidence * 0.04 + jitter * 0.05;
+      } else {
+        score = 0.58 + signal.hotEvidence * 0.08 + Math.max(0, signal.recentZ) / 3 * 0.04 + jitter * 0.02;
+      }
+
+      result[n] = clamp01(score);
+    }
+
+    return result;
   }
 
   function scoreRange(max, strategy, freq, recent, omit) {
@@ -305,6 +365,7 @@
       type: redCount === 6 && blueCount === 1 ? "single" : "complex",
       red,
       blue,
+      blueStars: blue.filter((n) => (scores.meta.starBlue || []).includes(n)),
       redCount,
       blueCount,
       betCount: comb(redCount, 6) * blueCount,
@@ -325,6 +386,7 @@
       type: "dantuo",
       red: selected,
       blue,
+      blueStars: blue.filter((n) => (scores.meta.starBlue || []).includes(n)),
       redCount: selected.length,
       blueCount,
       betCount: comb(tuo.length, 6 - dan.length) * blueCount,
@@ -458,22 +520,20 @@
     const splitScore = nums.length > 1 ? blueSpreadScore(nums) : historyScore;
     const repeatPenalty = latestBluePenalty(nums);
     const ruleScore = blueRuleScore(nums, meta);
-    return clamp01(historyScore * 0.25 + splitScore * 0.25 + repeatPenalty * 0.2 + ruleScore * 0.3);
+    return clamp01(historyScore * 0.35 + splitScore * 0.25 + repeatPenalty * 0.1 + ruleScore * 0.3);
   }
 
   function blueRuleScore(nums, meta) {
-    const hot = countOverlap(nums, meta.hotBlue || []);
-    const omit = countOverlap(nums, meta.omitBlue || []);
+    const signal = countOverlap(nums, meta.signalBlue || []);
     const latestRepeat = meta.latestBlue && nums.includes(meta.latestBlue) ? 1 : 0;
-    const hotScore = nums.length > 1 ? rangeScore(hot, 1, 1, nums.length) : rangeScore(hot, 0, 1, 1);
-    const omitScore = nums.length > 1 ? rangeScore(omit, 1, 1, nums.length) : rangeScore(omit, 0, 1, 1);
-    return clamp01(hotScore * 0.42 + omitScore * 0.42 + (latestRepeat ? 0 : 1) * 0.16);
+    const signalScore = clamp01(0.5 + signal / Math.max(1, nums.length) * 0.5);
+    return clamp01(signalScore * 0.55 + (latestRepeat ? 0.85 : 1) * 0.45);
   }
 
   function latestBluePenalty(nums) {
     const latest = history[history.length - 1];
     if (!latest) return 0.5;
-    return nums.includes(latest.blue) ? 0 : 1;
+    return nums.includes(latest.blue) ? 0.85 : 1;
   }
 
   function blueSpreadScore(nums) {
@@ -546,12 +606,12 @@
     currentScheme = scheme;
     const typeName = scheme.type === "dantuo" ? "胆拖" : scheme.type === "single" ? "单式" : "复式";
     const strategyNames = {
-      balanced: "反推规则：1-2 高频、1-2 久未出、1-2 上期附近号，叠加形态过滤",
-      hot: "规则模型 + 高频倾斜：高频号更容易进入候选，但仍受反推区间约束",
-      omission: "规则模型 + 遗漏倾斜：久未出号更容易进入候选，但控制在 1-2 个",
-      cold: "规则模型 + 冷号倾斜：低频号补位，避免全冷组合",
-      mixed: "规则模型 + 冷热混合：热号、久未出号和随机扰动混合",
-      random: "规则模型 + 随机底池：随机生成候选，再按反推规则和形态筛选"
+      balanced: "红球按反推区间，蓝球按统计证据弱加权，不追长期遗漏",
+      hot: "红球高频倾斜；蓝球只在频率偏差有证据时轻微倾斜",
+      omission: "红球遗漏回补；蓝球长期遗漏只作展示和极弱扰动",
+      cold: "红球冷号补位；蓝球冷门仅作分散覆盖，不视为更该出",
+      mixed: "红球冷热混合；蓝球接近均匀底池，叠加少量统计扰动",
+      random: "随机底池：随机生成候选，再按反推规则和形态筛选"
     };
     els.strategyNote.textContent = strategyNames[els.strategySelect.value];
 
@@ -560,7 +620,7 @@
          <div class="ball-row"><span class="tag">拖码</span>${ballsHtml(scheme.dantuo.tuo, "red")}</div>`
       : `<div class="ball-row"><span class="tag">红球</span>${ballsHtml(scheme.red, "red")}</div>`;
 
-    const blueHtml = `<div class="ball-row"><span class="tag">蓝球</span>${ballsHtml(scheme.blue, "blue")}</div>`;
+    const blueHtml = `<div class="ball-row"><span class="tag">蓝球</span>${ballsHtml(scheme.blue, "blue", new Set(scheme.blueStars || []))}</div>`;
     const text = scheme.type === "dantuo"
       ? `${typeName} 胆:${formatNums(scheme.dantuo.dan)} 拖:${formatNums(scheme.dantuo.tuo)} 蓝:${formatNums(scheme.blue)}`
       : `${typeName} 红:${formatNums(scheme.red)} 蓝:${formatNums(scheme.blue)}`;
@@ -587,8 +647,8 @@
     const hot = countOverlap(scheme.red, meta.hotRed || []);
     const omit = countOverlap(scheme.red, meta.omitRed || []);
     const repeat = countOverlap(scheme.red, meta.latestRed || []);
-    const blueHot = countOverlap(scheme.blue, meta.hotBlue || []);
-    const blueOmit = countOverlap(scheme.blue, meta.omitBlue || []);
+    const blueSignal = countOverlap(scheme.blue, meta.signalBlue || []);
+    const blueStar = countOverlap(scheme.blue, meta.starBlue || []);
     const blueRepeat = meta.latestBlue && scheme.blue.includes(meta.latestBlue) ? 1 : 0;
 
     els.strategyCompare.innerHTML = `
@@ -596,11 +656,11 @@
       <div class="compare-grid">
         <div class="compare-card">
           <strong>旧策略</strong>
-          <span>偏平均历史权重：频次、近期、遗漏综合打分，容易继续追热号或遗漏号。</span>
+          <span>频次、近期、遗漏混合打分，蓝球会被长期遗漏明显拉高，容易形成追冷。</span>
         </div>
         <div class="compare-card">
           <strong>新策略</strong>
-          <span>硬性靠近反推区间：红球 ${hot} 个高频、${omit} 个久未出、${repeat} 个上期重号；蓝球 ${blueHot} 热 / ${blueOmit} 漏 / ${blueRepeat ? "含上期蓝" : "避开上期蓝"}。</span>
+          <span>红球 ${hot} 个高频、${omit} 个久未出、${repeat} 个上期重号；蓝球 ${blueSignal} 个统计信号、${blueStar} 个星标，${blueRepeat ? "含上期蓝" : "未重复上期蓝"}。</span>
         </div>
       </div>
     `;
@@ -643,7 +703,8 @@
         ])
       : Object.fromEntries(scheme.red.map((n) => [n, "红球"]));
     const redRows = scheme.red.map((n) => reasonRow(pad(n), redRoles[n], stats.redFreq[n], stats.redRecent[n], stats.redOmit[n], numberReason(stats.redFreq[n], stats.redRecent[n], stats.redOmit[n])));
-    const blueRows = scheme.blue.map((n) => reasonRow(pad(n), "蓝球", stats.blueFreq[n], stats.blueRecent[n], stats.blueOmit[n], numberReason(stats.blueFreq[n], stats.blueRecent[n], stats.blueOmit[n])));
+    const blueSignals = buildBlueSignals(stats);
+    const blueRows = scheme.blue.map((n) => reasonRow(pad(n), "蓝球", stats.blueFreq[n], stats.blueRecent[n], stats.blueOmit[n], blueNumberReason(n, stats, blueSignals[n])));
 
     els.numberReasons.innerHTML = `
       <div class="subhead"><h3>号码解释</h3><span>频次/近 20 期/遗漏</span></div>
@@ -911,6 +972,8 @@
     const omitRed = topEntries(stats.redOmit, 8, "desc");
     const hotBlue = topEntries(stats.blueFreq, 6, "desc");
     const omitBlue = topEntries(stats.blueOmit, 6, "desc");
+    const blueSignals = buildBlueSignals(stats);
+    const signalBlue = topBlueSignals(blueSignals, 3);
     const shape = historyShapeSummary(scope);
     const points = strategyPoints(stats, shape);
 
@@ -919,7 +982,11 @@
         ${analysisCard("红球热号", pillList(hotRed.map(([n, v]) => `${pad(n)} · ${v}次`)))}
         ${analysisCard("红球冷号", pillList(coldRed.map(([n, v]) => `${pad(n)} · ${v}次`)))}
         ${analysisCard("红球长遗漏", pillList(omitRed.map(([n, v]) => `${pad(n)} · 漏${v}`)))}
-        ${analysisCard("蓝球重点", pillList([...hotBlue.map(([n, v]) => `${pad(n)}热${v}`), ...omitBlue.slice(0, 3).map(([n, v]) => `${pad(n)}漏${v}`)]))}
+        ${analysisCard("蓝球统计", pillList([
+          ...signalBlue.map(([n, signal]) => `${pad(n)} 信号${signal.hotEvidence.toFixed(2)}`),
+          ...hotBlue.slice(0, 3).map(([n, v]) => `${pad(n)}频${v}`),
+          ...omitBlue.slice(0, 3).map(([n, v]) => `${pad(n)}漏${v}仅参考`)
+        ]))}
         ${analysisCard("常见形态", `
           <div class="pill-list">
             <span class="pill">奇偶 ${shape.oddEven}</span>
@@ -1077,6 +1144,12 @@
     return result;
   }
 
+  function binomialZ(hitCount, sampleSize, probability) {
+    const variance = sampleSize * probability * (1 - probability);
+    if (!variance) return 0;
+    return (hitCount - sampleSize * probability) / Math.sqrt(variance);
+  }
+
   function averageScore(nums, scoreMap) {
     if (!nums.length) return 0;
     return clamp01(nums.reduce((sum, n) => sum + (scoreMap[n] || 0), 0) / nums.length);
@@ -1097,8 +1170,11 @@
     return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
   }
 
-  function ballsHtml(nums, type) {
-    return nums.map((n) => `<span class="ball ${type}">${pad(n)}</span>`).join("");
+  function ballsHtml(nums, type, stars = new Set()) {
+    return nums.map((n) => {
+      const starHtml = stars.has(n) ? `<sup class="ball-star" title="统计信号星标">★</sup>` : "";
+      return `<span class="ball ${type}${stars.has(n) ? " starred" : ""}">${pad(n)}${starHtml}</span>`;
+    }).join("");
   }
 
   function metricHtml(label, value, hint) {
@@ -1152,6 +1228,16 @@
     if (recent >= 3) parts.push("近期活跃");
     if (omit >= 10) parts.push("长遗漏");
     if (!parts.length) parts.push("形态补位");
+    return parts.join(" / ");
+  }
+
+  function blueNumberReason(n, stats, signal) {
+    const parts = [];
+    if (signal && signal.starred) parts.push("统计星标");
+    if (signal && signal.hotEvidence >= 0.35) parts.push("频率偏差信号");
+    if ((stats.blueRecent[n] || 0) >= 2) parts.push("近期覆盖");
+    if ((stats.blueOmit[n] || 0) >= 10) parts.push("遗漏仅展示");
+    if (!parts.length) parts.push("均匀底池");
     return parts.join(" / ");
   }
 
@@ -1290,6 +1376,20 @@
       .slice(0, count);
   }
 
+  function topBlueSignals(signals, count) {
+    return Object.entries(signals)
+      .map(([n, signal]) => [Number(n), signal])
+      .filter(([, signal]) => signal.hotEvidence >= BLUE_SIGNAL_MIN || signal.starred)
+      .sort((a, b) => b[1].hotEvidence - a[1].hotEvidence || b[1].freqZ - a[1].freqZ || a[0] - b[0])
+      .slice(0, count);
+  }
+
+  function starBlueSignals(signals) {
+    return Object.entries(signals)
+      .filter(([, signal]) => signal.starred)
+      .map(([n]) => Number(n));
+  }
+
   function analysisCard(title, content) {
     return `<div class="analysis-card"><h3>${escapeHtml(title)}</h3>${content}</div>`;
   }
@@ -1331,11 +1431,10 @@
   function strategyPoints(stats, shape) {
     const hotRed = topEntries(stats.redFreq, 4, "desc").map(([n]) => pad(n)).join(" ");
     const omitRed = topEntries(stats.redOmit, 4, "desc").map(([n]) => pad(n)).join(" ");
-    const hotBlue = topEntries(stats.blueFreq, 3, "desc").map(([n]) => pad(n)).join(" ");
-    const omitBlue = topEntries(stats.blueOmit, 3, "desc").map(([n]) => pad(n)).join(" ");
+    const blueSignals = topBlueSignals(buildBlueSignals(stats), 3).map(([n]) => pad(n)).join(" ");
     return [
       `红球建议用冷热混合：热号参考 ${hotRed}，长遗漏参考 ${omitRed}，不要全追单一方向。`,
-      `蓝球建议至少覆盖 2 个：热蓝参考 ${hotBlue}，长遗漏蓝参考 ${omitBlue}，多蓝球更利于小奖覆盖。`,
+      `蓝球默认按 1/16 均匀概率处理；统计信号参考 ${blueSignals || "无"}，长期遗漏不作为回补依据。`,
       `形态优先靠近历史主流：奇偶 ${shape.oddEven}，大小 ${shape.smallBig}，和值集中在 ${shape.sumBand} 附近。`,
       "多组投注时优先降低组间重号，比把资金堆在高度相似的几组号码上更有效。",
       "如果没有非常确定的胆码，优先用 7+2 或 8+2 复式；只有强看好 1-2 个红球时再用胆拖。"
