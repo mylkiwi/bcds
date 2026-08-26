@@ -61,8 +61,8 @@
     strategyResearch: document.getElementById("strategyResearch"),
     aiStatus: document.getElementById("aiStatus"),
     aiAnalyzeBtn: document.getElementById("aiAnalyzeBtn"),
-    fillAiBtn: document.getElementById("fillAiBtn"),
     aiRecommendation: document.getElementById("aiRecommendation"),
+    aiHistory: document.getElementById("aiHistory"),
     qualityPanel: document.getElementById("qualityPanel"),
     numberReasons: document.getElementById("numberReasons"),
     portfolioPanel: document.getElementById("portfolioPanel"),
@@ -120,13 +120,7 @@
       el.addEventListener("change", generate);
     });
 
-    els.modeSelect.addEventListener("change", () => {
-      const mode = els.modeSelect.value;
-      els.complexControls.classList.toggle("hidden", mode !== "complex");
-      els.dantuoControls.classList.toggle("hidden", mode !== "dantuo");
-      els.dantuoHelp.classList.toggle("hidden", mode !== "dantuo");
-      generate();
-    });
+    els.modeSelect.addEventListener("change", syncModeControls);
 
     els.generateBtn.addEventListener("click", generate);
     els.copyBtn.addEventListener("click", async () => {
@@ -142,11 +136,18 @@
     els.refreshPurchasesBtn.addEventListener("click", loadPurchaseState);
     els.checkNowBtn.addEventListener("click", checkNow);
     els.aiAnalyzeBtn.addEventListener("click", analyzeWithAi);
-    els.fillAiBtn.addEventListener("click", fillAiPurchase);
     els.adminToken.addEventListener("change", () => {
       localStorage.setItem("ssqAdminToken", els.adminToken.value.trim());
       loadPurchaseState();
+      loadAiHistory({ restoreLatest: true });
     });
+  }
+
+  function syncModeControls() {
+    const mode = els.modeSelect.value;
+    els.complexControls.classList.toggle("hidden", mode !== "complex");
+    els.dantuoControls.classList.toggle("hidden", mode !== "dantuo");
+    els.dantuoHelp.classList.toggle("hidden", mode !== "dantuo");
   }
 
   function renderStaticViews() {
@@ -155,6 +156,7 @@
   }
 
   function generate() {
+    currentAiResult = null;
     rng = createRng(`${recommendationSeed()}|${randomEntropy()}`);
     const scope = getScopeHistory();
     const stats = buildStats(scope);
@@ -1097,11 +1099,11 @@
     const strategyNames = {
       official: "官方机选模拟：随机生成，不看历史；勾选形态过滤时控制三区/奇偶/大小极端",
       fair: "均匀机选：完全按随机抽样，不引入历史偏置",
-      balanced: "AI 3.0 综合评分：50+统计指标、概率模型、机器学习弱特征和随机模拟集成",
-      hot: "AI 3.0 热号偏向：综合评分上调历史走势和滑动窗口信号",
-      omission: "AI 3.0 遗漏回补：综合评分上调遗漏周期和概率回补信号",
-      cold: "AI 3.0 冷号逆向：综合评分保留冷转热和遗漏尾部信号",
-      mixed: "AI 3.0 冷热混合：综合评分强调冷热转换和模拟分散",
+      balanced: "本地综合评分：统计指标、概率模型、弱特征和随机模拟集成",
+      hot: "本地热号方向：综合评分上调历史走势和滑动窗口信号",
+      omission: "本地遗漏方向：综合评分上调遗漏周期信号",
+      cold: "本地冷号方向：综合评分保留冷转热和遗漏尾部信号",
+      mixed: "本地冷热混合：综合评分强调冷热转换和模拟分散",
       random: "纯随机底池：与机选等价"
     };
     els.strategyNote.textContent = strategyNames[els.strategySelect.value];
@@ -1125,7 +1127,7 @@
     const anyPrize = anyPrizeProbability(scheme);
     const cost = scheme.betCount * 2;
     els.metrics.innerHTML = [
-      metricHtml("覆盖注数", `${scheme.betCount} 注`, "复式展开后的单注数量"),
+      metricHtml("覆盖注数", `${scheme.betCount} 注`, "按当前玩法实际展开的单注数量"),
       metricHtml("参考成本", `${cost} 元`, "按每注 2 元计算"),
       metricHtml("头奖概率", oneIn(jackpot), "只表示覆盖概率"),
       metricHtml("任意奖概率", `${(anyPrize * 100).toFixed(2)}%`, oneIn(anyPrize)),
@@ -1164,7 +1166,7 @@
     const starBlue = (meta.starBlue || []).map(pad).join(" ");
 
     els.strategyCompare.innerHTML = `
-      <div class="subhead"><h3>AI 3.0 评分报告</h3><span>统计指标 + 概率模型 + 机器学习弱特征 + 随机模拟</span></div>
+      <div class="subhead"><h3>本地评分报告</h3><span>统计指标 + 概率模型 + 弱特征 + 随机模拟</span></div>
       <div class="compare-grid">
         <div class="compare-card">
           <strong>模型权重</strong>
@@ -1200,15 +1202,16 @@
     const latest = history[history.length - 1];
     const latestOverlap = latest ? redOverlap(red, latest.red) : 0;
     const hitSummary = historicalHitSummary(scheme);
+    const metricScope = red.length === 6 ? "单注" : "号码池";
 
     els.qualityPanel.innerHTML = `
       <div class="subhead"><h3>组合质量体检</h3><span>用于排除极端形态和高分奖风险</span></div>
       <div class="quality-grid">
-        ${qualityItem("奇偶", `${odd}:${red.length - odd}`, "优先接近均衡")}
-        ${qualityItem("大小", `${small}:${red.length - small}`, "01-16 / 17-33")}
-        ${qualityItem("三区", zones.join(":"), "低/中/高区覆盖")}
-        ${qualityItem("和值", String(sum), "过低过高都降权")}
-        ${qualityItem("最长连号", `${maxRun} 连`, "3 连以上提高分奖风险")}
+        ${qualityItem("奇偶", `${odd}:${red.length - odd}`, `${metricScope}奇数 / 偶数`)}
+        ${qualityItem("大小", `${small}:${red.length - small}`, `${metricScope} 01-16 / 17-33`)}
+        ${qualityItem("三区", zones.join(":"), `${metricScope}低/中/高区覆盖`)}
+        ${qualityItem("和值", String(sum), `${metricScope}红球和值`)}
+        ${qualityItem("最长连号", `${maxRun} 连`, `${metricScope}最长连续段`)}
         ${qualityItem("上期重号", `${latestOverlap} 个`, "过高会降低分散度")}
         ${qualityItem("历史命中", hitSummary, "仅检查历史覆盖，不预测未来")}
       </div>
@@ -1227,7 +1230,7 @@
     const blueRows = scheme.blue.map((n) => reasonRow(pad(n), "蓝球", stats.blueFreq[n], stats.blueRecent[n], stats.blueOmit[n], ai3NumberReason(n, "blue", meta.blueSignals && meta.blueSignals[n], meta)));
 
     els.numberReasons.innerHTML = `
-      <div class="subhead"><h3>号码解释</h3><span>AI 3.0 综合分 / 频次 / 近 20 期 / 遗漏</span></div>
+      <div class="subhead"><h3>号码解释</h3><span>本地综合分 / 频次 / 近 20 期 / 遗漏</span></div>
       <div class="reason-table">
         <table>
           <thead><tr><th>号码</th><th>类型</th><th>频次</th><th>近期</th><th>遗漏</th><th>入选原因</th></tr></thead>
@@ -1261,22 +1264,27 @@
     `;
   }
 
-  function aiRecommendationCounts() {
-    if (els.modeSelect.value === "single") return { redCount: 6, blueCount: 1 };
-    if (els.modeSelect.value === "complex") {
-      return {
-        redCount: clampNumber(els.redCount.value, 6, 12),
-        blueCount: clampNumber(els.blueCount.value, 1, 6)
-      };
-    }
-    return { redCount: 7, blueCount: 2 };
+  function aiRequestConfig() {
+    const mode = els.modeSelect.value;
+    const params = readModeParams();
+    const config = {
+      scope: els.scopeSelect.value,
+      strategy: els.strategySelect.value,
+      bet_mode: mode,
+      red_count: mode === "single" ? 6 : mode === "complex" ? params.redCount : params.danCount + params.tuoCount,
+      blue_count: params.blueCount,
+      dan_count: mode === "dantuo" ? params.danCount : 0,
+      tuo_count: mode === "dantuo" ? params.tuoCount : 0,
+      shape_filter: els.shapeFilter.checked,
+      avoid_popular: els.avoidPopular.checked
+    };
+    return config;
   }
 
   async function analyzeWithAi() {
     currentAiResult = null;
-    els.fillAiBtn.disabled = true;
     setAiBusy(true);
-    els.aiStatus.textContent = "正在执行先分析、冻结规则、再选号的两阶段 DeepSeek 请求";
+    els.aiStatus.textContent = "正在核对当前策略、投注方式与历史报告";
     els.aiRecommendation.innerHTML = '<div class="ai-loading">正在分析历史统计、最近走势与滚动回测...</div>';
 
     try {
@@ -1286,26 +1294,21 @@
       if (activeTaskId) {
         task = await apiFetch(`/api/ai/tasks/${encodeURIComponent(activeTaskId)}`, { token });
       } else {
-        const counts = aiRecommendationCounts();
+        const config = aiRequestConfig();
         const clientRequestId = currentAiClientRequestId();
         task = await apiFetch("/api/ai/tasks", {
           method: "POST",
           token,
           body: JSON.stringify({
-            scope: els.scopeSelect.value,
-            red_count: counts.redCount,
-            blue_count: counts.blueCount,
-            shape_filter: els.shapeFilter.checked,
-            avoid_popular: els.avoidPopular.checked,
+            ...config,
             client_request_id: clientRequestId
           })
         });
         sessionStorage.setItem(AI_TASK_STORAGE_KEY, task.task_id);
       }
       const data = await waitForAiTask(task, token);
-      currentAiResult = data;
-      renderAiRecommendation(data);
-      els.fillAiBtn.disabled = false;
+      applyAiResult(data, { restoreControls: true });
+      await loadAiHistory();
     } catch (error) {
       if (error.status === 404 || error.taskFailed) {
         clearAiTaskStorage();
@@ -1319,7 +1322,7 @@
 
   function setAiBusy(busy) {
     els.aiAnalyzeBtn.disabled = busy;
-    els.aiAnalyzeBtn.textContent = busy ? "AI 分析中..." : "AI 分析并推荐";
+    els.aiAnalyzeBtn.textContent = busy ? "AI 分析中..." : "AI 分析生成";
     if (busy) els.aiAnalyzeBtn.setAttribute("aria-busy", "true");
     else els.aiAnalyzeBtn.removeAttribute("aria-busy");
   }
@@ -1385,13 +1388,176 @@
     throw new Error("AI 任务仍在后台运行，稍后可继续查询");
   }
 
+  function restoreAiControls(config) {
+    if (!config || typeof config !== "object") return;
+    if (Array.from(els.scopeSelect.options).some((option) => option.value === String(config.scope))) {
+      els.scopeSelect.value = String(config.scope);
+    }
+    if (Array.from(els.strategySelect.options).some((option) => option.value === config.strategy)) {
+      els.strategySelect.value = config.strategy;
+    }
+    if (["single", "complex", "dantuo"].includes(config.bet_mode)) {
+      els.modeSelect.value = config.bet_mode;
+    }
+    if (config.bet_mode === "complex") {
+      els.redCount.value = String(config.red_count || 7);
+      els.blueCount.value = String(config.blue_count || 2);
+    } else if (config.bet_mode === "dantuo") {
+      els.danCount.value = String(config.dan_count || 2);
+      els.tuoCount.value = String(config.tuo_count || 8);
+      els.dtBlueCount.value = String(config.blue_count || 2);
+    }
+    els.shapeFilter.checked = config.shape_filter !== false;
+    els.avoidPopular.checked = config.avoid_popular !== false;
+    syncModeControls();
+  }
+
+  function aiResultScheme(data) {
+    const recommendation = data?.recommendation || {};
+    const config = data?.request || {};
+    const betMode = recommendation.bet_mode || config.bet_mode || "complex";
+    const blue = (recommendation.blue || []).map(Number).sort((a, b) => a - b);
+    if (betMode === "dantuo") {
+      const dan = (recommendation.dan || []).map(Number).sort((a, b) => a - b);
+      const tuo = (recommendation.tuo || []).map(Number).sort((a, b) => a - b);
+      const red = Array.from(new Set([...dan, ...tuo])).sort((a, b) => a - b);
+      return {
+        type: "dantuo",
+        red,
+        blue,
+        blueStars: [],
+        redCount: red.length,
+        blueCount: blue.length,
+        betCount: comb(tuo.length, 6 - dan.length) * blue.length,
+        dantuo: { dan, tuo },
+        source: "deepseek"
+      };
+    }
+    const red = (recommendation.red || []).map(Number).sort((a, b) => a - b);
+    return {
+      type: betMode === "single" ? "single" : "complex",
+      red,
+      blue,
+      blueStars: [],
+      redCount: red.length,
+      blueCount: blue.length,
+      betCount: comb(red.length, 6) * blue.length,
+      dantuo: null,
+      source: "deepseek"
+    };
+  }
+
+  function applyAiResult(data, { restoreControls = false } = {}) {
+    if (!data || typeof data !== "object" || !data.recommendation) {
+      throw new Error("AI 分析记录格式错误");
+    }
+    if (restoreControls) restoreAiControls(data.request || {});
+    currentAiResult = data;
+    const scheme = aiResultScheme(data);
+    const scope = getScopeHistory();
+    const stats = buildStats(scope);
+
+    renderRecommendation(scheme);
+    const modeName = scheme.type === "dantuo" ? "胆拖" : scheme.type === "single" ? "单式" : "复式";
+    els.strategyNote.textContent = `DeepSeek 动态研究 · ${modeName} · 已写入历史记录`;
+    renderMetrics(scheme);
+    els.strategyCompare.innerHTML = "";
+    renderQuality(scheme);
+    els.numberReasons.innerHTML = "";
+    els.portfolioPanel.innerHTML = "";
+    renderHeatmaps(stats, scheme);
+    renderHistoryAnalysis(stats, scope);
+    renderAiRecommendation(data);
+  }
+
+  async function loadAiHistory({ restoreLatest = false } = {}) {
+    try {
+      const token = requireAdminToken();
+      const response = await apiFetch("/api/ai/recommendations?limit=12", { token });
+      const items = response.items || [];
+      renderAiHistory(items);
+      if (restoreLatest && items.length && !sessionStorage.getItem(AI_TASK_STORAGE_KEY)) {
+        await loadAiReport(items[0].id);
+      }
+    } catch (error) {
+      els.aiHistory.innerHTML = `<div class="purchase-empty">${escapeHtml(error.message)}</div>`;
+    }
+  }
+
+  function renderAiHistory(items) {
+    if (!items.length) {
+      els.aiHistory.innerHTML = '<div class="purchase-empty">还没有持久化的 AI 分析记录</div>';
+      return;
+    }
+    els.aiHistory.innerHTML = items.map((item) => {
+      const recommendation = item.recommendation || {};
+      const modeName = item.bet_mode === "dantuo" ? "胆拖" : item.bet_mode === "single" ? "单式" : "复式";
+      const numbers = item.bet_mode === "dantuo"
+        ? `胆:${formatNums(recommendation.dan || [])} 拖:${formatNums(recommendation.tuo || [])} 蓝:${formatNums(recommendation.blue || [])}`
+        : `红:${formatNums(recommendation.red || [])} 蓝:${formatNums(recommendation.blue || [])}`;
+      return `
+        <div class="ai-history-item">
+          <div>
+            <strong>${escapeHtml(item.latest_issue ? `数据至 ${item.latest_issue}` : modeName)} · ${escapeHtml(modeName)}</strong>
+            <span>${escapeHtml(formatAiReportTime(item.created_at))}</span>
+            <p>${escapeHtml(numbers)}</p>
+          </div>
+          <div class="ai-history-actions">
+            <button type="button" class="secondary" data-ai-report="${escapeHtml(item.id)}">查看</button>
+            <button type="button" class="link-btn" data-delete-ai-report="${escapeHtml(item.id)}">删除</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+    els.aiHistory.querySelectorAll("[data-ai-report]").forEach((button) => {
+      button.addEventListener("click", () => loadAiReport(button.dataset.aiReport));
+    });
+    els.aiHistory.querySelectorAll("[data-delete-ai-report]").forEach((button) => {
+      button.addEventListener("click", () => deleteAiReport(button.dataset.deleteAiReport));
+    });
+  }
+
+  async function loadAiReport(reportId) {
+    try {
+      const token = requireAdminToken();
+      const response = await apiFetch(`/api/ai/recommendations/${encodeURIComponent(reportId)}`, { token });
+      if (!response.item?.result) throw new Error("AI 分析记录内容缺失");
+      applyAiResult(response.item.result, { restoreControls: true });
+    } catch (error) {
+      els.aiStatus.textContent = error.message;
+    }
+  }
+
+  async function deleteAiReport(reportId) {
+    try {
+      const token = requireAdminToken();
+      await apiFetch(`/api/ai/recommendations/${encodeURIComponent(reportId)}`, { method: "DELETE", token });
+      const deletingCurrent = currentAiResult?.report_id === reportId;
+      if (deletingCurrent) {
+        currentAiResult = null;
+        els.aiStatus.textContent = "AI 分析记录已删除";
+        els.aiRecommendation.innerHTML = '<div class="purchase-empty">暂无 AI 分析报告</div>';
+      }
+      await loadAiHistory({ restoreLatest: deletingCurrent });
+    } catch (error) {
+      els.aiStatus.textContent = error.message;
+    }
+  }
+
+  function formatAiReportTime(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value || "") : date.toLocaleString("zh-CN", { hour12: false });
+  }
+
   function renderAiRecommendation(data) {
     const recommendation = data.recommendation || {};
     const research = data.research || {};
     const researchData = research.data || {};
     const pipeline = data.pipeline || {};
     const structure = recommendation.structure || {};
-    const dynamicProfile = recommendation.dynamic_profile || {};
+    const ticketStructure = recommendation.ticket_structure || {};
+    const dynamicRules = recommendation.dynamic_rules || [];
+    const betMode = recommendation.bet_mode || data.request?.bet_mode || "complex";
     const shapeHistory = research.shape_history?.selected_scope || {};
     const mostCommon = (items) => (items || []).reduce((best, item) => {
       if (!best || Number(item.count || 0) > Number(best.count || 0)) return item;
@@ -1413,17 +1579,26 @@
         return `<li><strong>${escapeHtml(item.label || item.id || "历史依据")}（${escapeHtml(value)}）</strong>：${escapeHtml(item.reason || "")}</li>`;
       })
       .join("");
-    const profileRange = (value) => Array.isArray(value) && value.length === 2 ? `${value[0]}-${value[1]}` : "-";
-    const dynamicProfileText = [
-      `奇数 ${profileRange(dynamicProfile.odd_range)} 个`,
-      `小号 ${profileRange(dynamicProfile.small_range)} 个`,
-      `三区下限 ${(dynamicProfile.zone_minimums || []).join(":") || "-"}`,
-      `和值 ${profileRange(dynamicProfile.sum_range)}`,
-      `最长连号 ${dynamicProfile.max_consecutive_run ?? "-"}`
-    ].join("；");
-    const betCount = comb((recommendation.red || []).length, 6) * (recommendation.blue || []).length;
+    const dynamicRulesText = dynamicRules.length
+      ? dynamicRules.map(formatAiDynamicRule).join("；")
+      : "本期未启用形态硬规则，只校验玩法合法性";
+    const danSet = new Set(recommendation.dan || []);
+    const betCount = betMode === "dantuo"
+      ? comb((recommendation.tuo || []).length, 6 - (recommendation.dan || []).length) * (recommendation.blue || []).length
+      : comb((recommendation.red || []).length, 6) * (recommendation.blue || []).length;
+    const redTicketCount = Number(ticketStructure.red_ticket_count || Math.max(1, betCount / Math.max(1, (recommendation.blue || []).length)));
+    const oddFallback = Number(String(structure.odd_even || "0:0").split(":")[0]);
+    const smallFallback = Number(String(structure.small_large || "0:0").split(":")[0]);
+    const oddRange = ticketStructure.odd_range || [oddFallback, oddFallback];
+    const smallRange = ticketStructure.small_range || [smallFallback, smallFallback];
+    const sumRange = ticketStructure.sum_range || [structure.sum ?? "-", structure.sum ?? "-"];
+    const rangeText = (range, suffix = "") => `${range[0] === range[1] ? range[0] : `${range[0]}-${range[1]}`}${suffix}`;
+    const zonePatternText = (ticketStructure.zone_patterns || [])
+      .slice(0, 3)
+      .map((item) => `${item.pattern}(${item.count}组)`)
+      .join(" · ") || structure.zones || "-";
     const reasonCards = [
-      ...(recommendation.red_reasons || []).map((item) => aiReasonCard(item, "red")),
+      ...(recommendation.red_reasons || []).map((item) => aiReasonCard(item, "red", betMode === "dantuo" ? (danSet.has(item.number) ? "胆码" : "拖码") : "")),
       ...(recommendation.blue_reasons || []).map((item) => aiReasonCard(item, "blue"))
     ].join("");
     const backtests = (research.backtests || []).map((item) => {
@@ -1438,12 +1613,17 @@
       `;
     }).join("");
 
-    const pipelineLabel = pipeline.analysis_frozen_before_selection ? "先分析后选号 · 规则已冻结" : "动态研究";
-    els.aiStatus.textContent = `${data.model || "DeepSeek"} · ${pipelineLabel} · 数据截至 ${researchData.latest_issue || "-"}`;
+    const pipelineLabel = pipeline.rules_selected_dynamically ? "规则类型动态选择并冻结" : "先分析后选号";
+    const modeName = betMode === "dantuo" ? "胆拖" : betMode === "single" ? "单式" : "复式";
+    els.aiStatus.textContent = `${data.model || "DeepSeek"} · ${pipelineLabel} · ${modeName} · 数据截至 ${researchData.latest_issue || "-"}`;
+    const redPoolHtml = betMode === "dantuo"
+      ? `<div class="ball-row"><span class="tag">胆码</span>${ballsHtml(recommendation.dan || [], "red")}</div>
+         <div class="ball-row"><span class="tag">拖码</span>${ballsHtml(recommendation.tuo || [], "red")}</div>`
+      : `<div class="ball-row"><span class="tag">红球</span>${ballsHtml(recommendation.red || [], "red")}</div>`;
     els.aiRecommendation.innerHTML = `
       <div class="ai-result-head">
         <div>
-          <div class="ball-row"><span class="tag">红球</span>${ballsHtml(recommendation.red || [], "red")}</div>
+          ${redPoolHtml}
           <div class="ball-row"><span class="tag">蓝球</span>${ballsHtml(recommendation.blue || [], "blue")}</div>
         </div>
         <div class="ai-meta">
@@ -1454,19 +1634,20 @@
       <p class="ai-summary">${escapeHtml(recommendation.summary || "AI 已完成历史研究并给出结构化组合。")}</p>
       <div class="subhead"><h3>本期动态规则</h3><span>本次分析生成，不是固定模板</span></div>
       <div class="ai-dynamic-rules">
+        <p><strong>策略核对：</strong>${escapeHtml(recommendation.strategy_assessment || "AI 未单列策略核对结论。")}</p>
         <ul class="ai-rule-list">${selectionRules || "<li>AI 未单列规则，以逐号分析和形态依据为准。</li>"}</ul>
         <p><strong>历史形态报告：</strong>${escapeHtml(shapeReport)}</p>
-        <p><strong>AI 动态口径：</strong>${escapeHtml(dynamicProfileText)}</p>
+        <p><strong>本期启用规则：</strong>${escapeHtml(dynamicRulesText)}</p>
         <p><strong>动态口径依据：</strong></p>
         <ul class="ai-rule-list">${profileEvidence || "<li>等待服务端核对 AI 引用的历史依据。</li>"}</ul>
         <p><strong>AI 本期取舍：</strong>${escapeHtml(recommendation.model_structure_rationale || "等待 AI 返回本期形态取舍。")}</p>
         <p><strong>服务端结构核对：</strong>${escapeHtml(recommendation.structure_rationale || "等待服务端核对最终号码结构。")}</p>
       </div>
       <div class="ai-structure">
-        ${metricHtml("奇偶", structure.odd_even || "-", "红球奇数 / 偶数")}
-        ${metricHtml("大小", structure.small_large || "-", "01-16 / 17-33")}
-        ${metricHtml("三区", structure.zones || "-", "01-11 / 12-22 / 23-33")}
-        ${metricHtml("和值", String(structure.sum ?? "-"), `跨度 ${structure.span ?? "-"} · 最长连号 ${structure.max_consecutive ?? "-"}`)}
+        ${metricHtml("单注奇数", rangeText(oddRange, " 个"), `${redTicketCount} 组实际6红组合`)}
+        ${metricHtml("单注小号", rangeText(smallRange, " 个"), "每组 01-16 个数")}
+        ${metricHtml("单注三区", zonePatternText, "01-11 / 12-22 / 23-33")}
+        ${metricHtml("单注和值", rangeText(sumRange), `单注最长连号 ${ticketStructure.max_consecutive ?? structure.max_consecutive ?? "-"}`)}
       </div>
       <div class="subhead"><h3>逐号分析</h3><span>AI 理由 + 服务端真实统计</span></div>
       <div class="ai-reason-grid">${reasonCards}</div>
@@ -1481,12 +1662,26 @@
     `;
   }
 
-  function aiReasonCard(item, kind) {
+  function formatAiDynamicRule(rule) {
+    const labels = {
+      odd_count: "每注奇数个数",
+      small_count: "每注 01-16 个数",
+      zone_minimums: "每注三区下限",
+      sum: "每注6红和值",
+      max_consecutive_run: "每注最长连号"
+    };
+    const label = labels[rule.field] || rule.field || "动态规则";
+    if (rule.field === "zone_minimums") return `${label} ${(rule.values || []).join(":")}`;
+    if (rule.field === "max_consecutive_run") return `${label}不超过 ${rule.max}`;
+    return `${label} ${rule.min}-${rule.max}`;
+  }
+
+  function aiReasonCard(item, kind, role = "") {
     return `
       <div class="ai-reason-card">
         <div class="ball-row">
           <span class="ball ${kind}">${pad(Number(item.number))}</span>
-          <strong>${kind === "red" ? "红球" : "蓝球"} ${pad(Number(item.number))}</strong>
+          <strong>${role || (kind === "red" ? "红球" : "蓝球")} ${pad(Number(item.number))}</strong>
         </div>
         <p>${escapeHtml(item.reason || "用于组合分散。")}</p>
         <span>统计 ${escapeHtml(String(item.frequency ?? "-"))} · 近20期 ${escapeHtml(String(item.recent20 ?? "-"))} · 遗漏 ${escapeHtml(String(item.omission ?? "-"))}</span>
@@ -1504,18 +1699,6 @@
     }[name] || name;
   }
 
-  function fillAiPurchase() {
-    const recommendation = currentAiResult && currentAiResult.recommendation;
-    if (!recommendation) return;
-    els.purchaseIssue.value = nextIssue();
-    els.purchaseMode.value = "complex";
-    togglePurchaseMode();
-    els.purchaseRed.value = formatNums(recommendation.red || []);
-    els.purchaseBlue.value = formatNums(recommendation.blue || []);
-    els.purchaseNote.value = `AI历史研究 红:${formatNums(recommendation.red || [])} 蓝:${formatNums(recommendation.blue || [])}`;
-    els.purchaseStatus.textContent = "已填入 AI 历史研究推荐";
-  }
-
   function initPurchasePanel() {
     const savedToken = localStorage.getItem("ssqAdminToken") || "";
     els.adminToken.value = savedToken;
@@ -1525,9 +1708,12 @@
       loadPurchaseState();
       if (sessionStorage.getItem(AI_TASK_STORAGE_KEY)) {
         analyzeWithAi();
+      } else {
+        loadAiHistory({ restoreLatest: true });
       }
     } else {
       els.purchaseList.innerHTML = emptyPurchaseHtml("输入管理密钥后读取服务器购买记录");
+      els.aiHistory.innerHTML = emptyPurchaseHtml("输入管理密钥后读取 AI 分析记录");
     }
   }
 
@@ -1658,7 +1844,7 @@
       return `
         <div class="purchase-card">
           <div class="purchase-card-head">
-            <strong>${escapeHtml(purchase.issue)} · ${purchase.type === "dantuo" ? "胆拖" : "复式"}</strong>
+            <strong>${escapeHtml(purchase.issue)} · ${purchase.type === "dantuo" ? "胆拖" : purchase.type === "single" ? "单式" : "复式"}</strong>
             <span class="purchase-state ${result && result.won ? "won" : ""}">${escapeHtml(status)}</span>
           </div>
           <p>${numbers}</p>

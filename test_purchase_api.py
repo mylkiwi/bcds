@@ -17,7 +17,9 @@ class AiTaskApiTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_history_path = purchase_api.HISTORY_PATH
+        self.original_ai_database_path = purchase_api.AI_DATABASE_PATH
         purchase_api.HISTORY_PATH = Path(self.temp_dir.name) / "history.json"
+        purchase_api.AI_DATABASE_PATH = Path(self.temp_dir.name) / "ssq.sqlite3"
         purchase_api.HISTORY_PATH.write_text("[]\n", encoding="utf-8")
         self.env_patch = patch.dict(
             os.environ,
@@ -53,6 +55,7 @@ class AiTaskApiTests(unittest.TestCase):
         with purchase_api.AI_USAGE_LOCK:
             purchase_api.AI_REQUEST_TIMES.clear()
         purchase_api.HISTORY_PATH = self.original_history_path
+        purchase_api.AI_DATABASE_PATH = self.original_ai_database_path
         self.env_patch.stop()
         self.temp_dir.cleanup()
 
@@ -112,7 +115,8 @@ class AiTaskApiTests(unittest.TestCase):
             release.set()
             succeeded = self.wait_for_status(task["status_url"], "succeeded")
 
-        self.assertEqual(succeeded["result"], expected)
+        self.assertEqual(succeeded["result"]["recommendation"], expected["recommendation"])
+        self.assertEqual(succeeded["result"]["report_id"], task["task_id"])
         self.assertEqual(calls[0][1]["red_count"], 7)
         self.assertEqual(len(purchase_api.AI_REQUEST_TIMES), 1)
 
@@ -139,7 +143,9 @@ class AiTaskApiTests(unittest.TestCase):
                 payload={"client_request_id": "client-request-pass2"},
             )
             self.assertEqual(code, 202)
-            self.assertEqual(self.wait_for_status(second["status_url"], "succeeded")["result"], {"ok": True})
+            succeeded = self.wait_for_status(second["status_url"], "succeeded")["result"]
+            self.assertTrue(succeeded["ok"])
+            self.assertEqual(succeeded["report_id"], second["task_id"])
 
     def test_active_task_is_idempotent_and_blocks_other_ai_requests(self):
         entered = threading.Event()
@@ -199,7 +205,66 @@ class AiTaskApiTests(unittest.TestCase):
         expected = {"pipeline": {"mode": "two_stage"}}
         with patch.object(purchase_api, "generate_ai_recommendation", return_value=expected):
             code, result = self.request("/api/ai/recommendation", method="POST", payload={})
-        self.assertEqual((code, result), (200, expected))
+        self.assertEqual(code, 200)
+        self.assertEqual(result["pipeline"], expected["pipeline"])
+        self.assertTrue(result["report_id"])
+
+    def test_successful_report_persists_after_task_memory_is_cleared(self):
+        expected = {
+            "recommendation": {
+                "summary": "persisted",
+                "red": [1, 2, 3, 4, 5, 6, 7],
+                "blue": [8, 9],
+                "bet_mode": "complex",
+            },
+            "research": {"data": {"latest_issue": "2026098"}},
+            "generated_at": "2026-08-26T08:00:00+00:00",
+            "model": "test-model",
+        }
+        with patch.object(purchase_api, "generate_ai_recommendation", return_value=expected):
+            code, task = self.request(
+                "/api/ai/tasks",
+                method="POST",
+                payload={"client_request_id": "client-request-persist1", "bet_mode": "complex"},
+            )
+            self.assertEqual(code, 202)
+            succeeded = self.wait_for_status(task["status_url"], "succeeded")
+
+        with purchase_api.AI_JOB_LOCK:
+            purchase_api.AI_JOBS.clear()
+        code, listing = self.request("/api/ai/recommendations?limit=10")
+        self.assertEqual(code, 200)
+        self.assertEqual(listing["items"][0]["id"], succeeded["result"]["report_id"])
+        code, latest = self.request("/api/ai/recommendations/latest")
+        self.assertEqual(code, 200)
+        self.assertEqual(latest["item"]["result"]["recommendation"]["summary"], "persisted")
+
+    def test_dantuo_request_is_forwarded_to_generator(self):
+        calls = []
+
+        def fake_generator(_rows, **options):
+            calls.append(options)
+            return {"ok": True}
+
+        with patch.object(purchase_api, "generate_ai_recommendation", fake_generator):
+            code, task = self.request(
+                "/api/ai/tasks",
+                method="POST",
+                payload={
+                    "client_request_id": "client-request-dantuo1",
+                    "strategy": "mixed",
+                    "bet_mode": "dantuo",
+                    "dan_count": 2,
+                    "tuo_count": 8,
+                    "blue_count": 2,
+                },
+            )
+            self.assertEqual(code, 202)
+            self.wait_for_status(task["status_url"], "succeeded")
+
+        self.assertEqual(calls[0]["strategy"], "mixed")
+        self.assertEqual(calls[0]["bet_mode"], "dantuo")
+        self.assertEqual((calls[0]["dan_count"], calls[0]["tuo_count"]), (2, 8))
 
     def test_cleanup_keeps_running_tasks_and_expires_terminal_tasks(self):
         now = time.time()

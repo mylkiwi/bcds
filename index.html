@@ -36,11 +36,11 @@
             <select id="strategySelect">
               <option value="official">官方机选模拟</option>
               <option value="fair">概率机选（可过滤）</option>
-              <option value="balanced" selected>AI 3.0 综合</option>
-              <option value="hot">AI 3.0 热号偏向</option>
-              <option value="omission">AI 3.0 遗漏回补</option>
-              <option value="cold">AI 3.0 冷号逆向</option>
-              <option value="mixed">AI 3.0 冷热混合</option>
+              <option value="balanced" selected>本地综合研究</option>
+              <option value="hot">本地热号方向</option>
+              <option value="omission">本地遗漏方向</option>
+              <option value="cold">本地冷号方向</option>
+              <option value="mixed">本地冷热混合</option>
               <option value="random">纯随机</option>
             </select>
           </label>
@@ -82,7 +82,7 @@
 
         <div id="dantuoHelp" class="mode-help hidden">
           <strong>胆拖玩法</strong>
-          <span>胆码是你最看好的<span class="red-text">红球</span>，必须全部命中；拖码用于补足 6 个<span class="red-text">红球</span>。注数 = C(拖码数, 6 - 胆码数) * <span class="blue-text">蓝球</span>数。</span>
+          <span>胆码是每注固定包含的<span class="red-text">红球</span>，必须全部命中；拖码用于补足 6 个<span class="red-text">红球</span>。注数 = C(拖码数, 6 - 胆码数) * <span class="blue-text">蓝球</span>数。</span>
         </div>
 
         <div class="filter-controls">
@@ -108,7 +108,8 @@
         </div>
 
         <div class="actions">
-          <button id="generateBtn" type="button">生成推荐</button>
+          <button id="generateBtn" type="button">本地生成</button>
+          <button id="aiAnalyzeBtn" type="button">AI 分析生成</button>
           <button id="copyBtn" type="button" class="secondary">复制号码</button>
         </div>
       </section>
@@ -126,18 +127,16 @@
         <div id="portfolioPanel" class="portfolio-panel"></div>
       </section>
 
-      <section class="panel ai-panel wide" aria-label="DeepSeek AI 历史研究推荐">
+      <section class="panel ai-panel wide" aria-label="AI 分析报告与历史记录">
         <div class="section-head">
-          <h2>DeepSeek AI 历史研究推荐</h2>
-          <span id="aiStatus">真实统计与回测由服务端计算，AI 先生成并冻结本期规则，再生成号码</span>
-        </div>
-        <div class="actions ai-actions">
-          <button id="aiAnalyzeBtn" type="button">AI 分析并推荐</button>
-          <button id="fillAiBtn" type="button" class="secondary" disabled>填入购买记录</button>
+          <h2>AI 分析报告</h2>
+          <span id="aiStatus">尚未读取 AI 分析记录</span>
         </div>
         <div id="aiRecommendation" class="ai-recommendation">
-          <div class="purchase-empty">等待 AI 历史研究</div>
+          <div class="purchase-empty">暂无 AI 分析报告</div>
         </div>
+        <div class="subhead ai-history-head"><h3>历史记录</h3><span>SQLite 持久保存</span></div>
+        <div id="aiHistory" class="ai-history"></div>
       </section>
 
       <section class="panel purchase-panel wide" aria-label="购买记录">

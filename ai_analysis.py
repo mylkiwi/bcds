@@ -21,6 +21,17 @@ BLUE_MAX = 16
 RED_DRAW_COUNT = 6
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
+BET_MODES = {"single", "complex", "dantuo"}
+STRATEGY_POLICIES = {
+    "official": "官方机选口径：不把历史冷热或遗漏作为选号优势，只允许按需做票面形态筛选",
+    "fair": "概率机选口径：保持均匀抽样思路，历史数据只用于检查极端形态",
+    "balanced": "综合研究：同时比较长期统计、近期走势、历史形态和滚动回测",
+    "hot": "热号方向：必须先用滚动回测核对，证据不足时应弱化或否定该方向",
+    "omission": "遗漏方向：必须先用滚动回测核对，不得把久未出现解释为更可能回补",
+    "cold": "冷号方向：必须先用滚动回测核对，证据不足时应弱化或否定该方向",
+    "mixed": "冷热混合：把冷热标签仅作为分散覆盖的候选维度",
+    "random": "纯随机口径：历史研究只用于解释，不对号码分配预测权重",
+}
 
 
 class AiAnalysisError(RuntimeError):
@@ -127,7 +138,7 @@ def shape_metrics(red: list[int]) -> dict:
     odd = sum(value % 2 for value in red)
     small = sum(value <= 16 for value in red)
     tails = Counter(value % 10 for value in red)
-    return {
+    result = {
         "odd_even": f"{odd}:{len(red) - odd}",
         "small_large": f"{small}:{len(red) - small}",
         "zones": ":".join(str(value) for value in zone_counts(red)),
@@ -135,6 +146,66 @@ def shape_metrics(red: list[int]) -> dict:
         "span": max(red) - min(red),
         "max_consecutive": max_consecutive_run(red),
         "max_same_tail": max(tails.values(), default=0),
+    }
+    return result
+
+
+def expanded_red_tickets(
+    red: list[int],
+    *,
+    bet_mode: str,
+    dan: list[int] | None = None,
+    tuo: list[int] | None = None,
+) -> list[list[int]]:
+    """Expand a ticket format into the distinct six-red combinations it buys."""
+    if bet_mode == "dantuo":
+        fixed = sorted(dan or [])
+        candidates = sorted(tuo or [])
+        choose_count = RED_DRAW_COUNT - len(fixed)
+        if not 1 <= len(fixed) <= 5 or choose_count < 1 or len(candidates) < choose_count:
+            return []
+        return [sorted(fixed + list(values)) for values in combinations(candidates, choose_count)]
+    if len(red) == RED_DRAW_COUNT:
+        return [sorted(red)]
+    return [list(values) for values in combinations(sorted(red), RED_DRAW_COUNT)]
+
+
+def red_ticket_count_for_mode(
+    *, bet_mode: str, red_count: int, dan_count: int = 0, tuo_count: int = 0
+) -> int:
+    if bet_mode == "dantuo":
+        choose_count = RED_DRAW_COUNT - dan_count
+        return math.comb(tuo_count, choose_count) if 0 <= choose_count <= tuo_count else 0
+    return math.comb(red_count, RED_DRAW_COUNT) if red_count >= RED_DRAW_COUNT else 0
+
+
+def ticket_structure_summary(tickets: list[list[int]]) -> dict:
+    structures = [shape_metrics(ticket) for ticket in tickets]
+    if not structures:
+        return {
+            "red_ticket_count": 0,
+            "odd_range": [0, 0],
+            "small_range": [0, 0],
+            "sum_range": [0, 0],
+            "max_consecutive": 0,
+            "consecutive_ticket_count": 0,
+            "zone_patterns": [],
+        }
+    odd_values = [int(item["odd_even"].split(":", 1)[0]) for item in structures]
+    small_values = [int(item["small_large"].split(":", 1)[0]) for item in structures]
+    sums = [item["sum"] for item in structures]
+    zone_patterns = Counter(item["zones"] for item in structures)
+    return {
+        "red_ticket_count": len(structures),
+        "odd_range": [min(odd_values), max(odd_values)],
+        "small_range": [min(small_values), max(small_values)],
+        "sum_range": [min(sums), max(sums)],
+        "max_consecutive": max(item["max_consecutive"] for item in structures),
+        "consecutive_ticket_count": sum(item["max_consecutive"] >= 2 for item in structures),
+        "zone_patterns": [
+            {"pattern": pattern, "count": count}
+            for pattern, count in zone_patterns.most_common()
+        ],
     }
 
 
@@ -211,7 +282,14 @@ def shape_distribution(rows: list[dict]) -> dict:
     }
 
 
-def factual_structure_rationale(red: list[int], snapshot: dict) -> str:
+def factual_structure_rationale(
+    red: list[int],
+    snapshot: dict,
+    *,
+    bet_mode: str,
+    dan: list[int] | None = None,
+    tuo: list[int] | None = None,
+) -> str:
     structure = shape_metrics(red)
     history = snapshot["shape_history"]["selected_scope"]
 
@@ -233,22 +311,26 @@ def factual_structure_rationale(red: list[int], snapshot: dict) -> str:
         f"本组{len(red)}红池实际奇偶{structure['odd_even']}、大小{structure['small_large']}、"
         f"三区{structure['zones']}、和值{structure['sum']}、最长连号{structure['max_consecutive']}。"
     )
-    if len(red) == RED_DRAW_COUNT:
+    tickets = expanded_red_tickets(red, bet_mode=bet_mode, dan=dan, tuo=tuo)
+    if len(tickets) == 1:
         return actual + historical
 
-    expanded = [shape_metrics(list(values)) for values in combinations(red, RED_DRAW_COUNT)]
-    odd_values = [int(item["odd_even"].split(":", 1)[0]) for item in expanded]
-    small_values = [int(item["small_large"].split(":", 1)[0]) for item in expanded]
-    sums = [item["sum"] for item in expanded]
-    zone_patterns = Counter(item["zones"] for item in expanded)
+    ticket_summary = ticket_structure_summary(tickets)
     zone_text = "、".join(
-        f"{pattern}（{count}注）" for pattern, count in zone_patterns.most_common(3)
+        f"{item['pattern']}（{item['count']}组）"
+        for item in ticket_summary["zone_patterns"][:3]
     )
-    consecutive_lines = sum(item["max_consecutive"] >= 2 for item in expanded)
+    mode_text = (
+        f"按{len(dan or [])}胆{len(tuo or [])}拖实际展开"
+        if bet_mode == "dantuo"
+        else "按复式实际展开"
+    )
     expanded_text = (
-        f"展开{len(expanded)}注6红后，奇数个数{min(odd_values)}-{max(odd_values)}、"
-        f"小号个数{min(small_values)}-{max(small_values)}、和值{min(sums)}-{max(sums)}，"
-        f"主要三区为{zone_text}，含连号{consecutive_lines}注。"
+        f"{mode_text}{ticket_summary['red_ticket_count']}组6红组合后，"
+        f"奇数个数{ticket_summary['odd_range'][0]}-{ticket_summary['odd_range'][1]}、"
+        f"小号个数{ticket_summary['small_range'][0]}-{ticket_summary['small_range'][1]}、"
+        f"和值{ticket_summary['sum_range'][0]}-{ticket_summary['sum_range'][1]}，"
+        f"主要三区为{zone_text}，含连号{ticket_summary['consecutive_ticket_count']}组。"
     )
     return actual + expanded_text + historical
 
@@ -368,57 +450,96 @@ def _text_list(value, *, limit: int, length: int) -> list[str]:
     return [str(item).strip()[:length] for item in value if str(item).strip()][:limit]
 
 
-def _dynamic_profile(value, *, red_count: int) -> dict:
-    if not isinstance(value, dict):
-        raise AiAnalysisError("AI 未返回机器可校验的动态形态口径")
+DYNAMIC_RULE_FIELDS = {
+    "odd_count": "odd_range",
+    "small_count": "small_range",
+    "zone_minimums": "zone_minimums",
+    "sum": "sum_range",
+    "max_consecutive_run": "max_consecutive_run",
+}
+PROFILE_FIELDS = set(DYNAMIC_RULE_FIELDS.values())
+EVIDENCE_SOURCES = {"statistics", "trend", "shape_history", "backtest"}
 
-    def integer(item, field: str) -> int:
-        if type(item) is int:
-            return item
-        if isinstance(item, str) and re.fullmatch(r"\d{1,3}", item.strip()):
-            return int(item)
-        raise AiAnalysisError(f"AI 动态口径的{field}不是整数")
 
-    def pair(field: str, minimum: int, maximum: int) -> list[int]:
-        raw = value.get(field)
-        if not isinstance(raw, list) or len(raw) != 2:
-            raise AiAnalysisError(f"AI 动态口径的{field}格式错误")
-        result = [integer(item, field) for item in raw]
-        if result[0] > result[1] or result[0] < minimum or result[1] > maximum:
-            raise AiAnalysisError(f"AI 动态口径的{field}范围无效")
-        return result
+def _rule_integer(item, field: str) -> int:
+    if type(item) is int:
+        return item
+    if isinstance(item, str) and re.fullmatch(r"\d{1,3}", item.strip()):
+        return int(item)
+    raise AiAnalysisError(f"AI 动态规则的{field}不是整数")
 
-    odd_range = pair("odd_range", 0, red_count)
-    small_range = pair("small_range", 0, red_count)
-    legal_sum_min = sum(range(1, red_count + 1))
-    legal_sum_max = sum(range(RED_MAX - red_count + 1, RED_MAX + 1))
-    sum_range = pair("sum_range", legal_sum_min, legal_sum_max)
-    raw_zones = value.get("zone_minimums")
-    if not isinstance(raw_zones, list) or len(raw_zones) != 3:
-        raise AiAnalysisError("AI 动态口径的zone_minimums格式错误")
-    zone_minimums = [integer(item, "zone_minimums") for item in raw_zones]
-    if any(item < 0 or item > red_count for item in zone_minimums) or sum(zone_minimums) > red_count:
-        raise AiAnalysisError("AI 动态口径的zone_minimums范围无效")
-    max_consecutive_run = integer(value.get("max_consecutive_run"), "max_consecutive_run")
-    if not 1 <= max_consecutive_run <= red_count:
-        raise AiAnalysisError("AI 动态口径的max_consecutive_run范围无效")
+
+def _broad_dynamic_profile(red_count: int = RED_DRAW_COUNT) -> dict:
     return {
-        "odd_range": odd_range,
-        "small_range": small_range,
-        "zone_minimums": zone_minimums,
-        "sum_range": sum_range,
-        "max_consecutive_run": max_consecutive_run,
+        "odd_range": [0, red_count],
+        "small_range": [0, red_count],
+        "zone_minimums": [0, 0, 0],
+        "sum_range": [sum(range(1, red_count + 1)), sum(range(RED_MAX - red_count + 1, RED_MAX + 1))],
+        "max_consecutive_run": red_count,
+        "active_fields": [],
     }
 
 
-PROFILE_FIELDS = {
-    "odd_range",
-    "small_range",
-    "zone_minimums",
-    "sum_range",
-    "max_consecutive_run",
-}
-EVIDENCE_SOURCES = {"statistics", "trend", "shape_history", "backtest"}
+def _normalize_dynamic_rules(value, snapshot: dict) -> tuple[list[dict], dict]:
+    if not isinstance(value, list) or len(value) > len(DYNAMIC_RULE_FIELDS):
+        raise AiAnalysisError("AI 动态规则格式错误")
+
+    catalog = {item["id"]: item for item in build_profile_evidence_catalog(snapshot)}
+    red_count = RED_DRAW_COUNT
+    profile = _broad_dynamic_profile()
+    normalized = []
+    seen_fields = set()
+
+    for raw in value:
+        if not isinstance(raw, dict):
+            raise AiAnalysisError("AI 动态规则格式错误")
+        field = str(raw.get("field", "")).strip()
+        profile_field = DYNAMIC_RULE_FIELDS.get(field)
+        if not profile_field or field in seen_fields:
+            raise AiAnalysisError("AI 动态规则类型无效或重复")
+        seen_fields.add(field)
+
+        description = str(raw.get("description", "")).strip()[:240]
+        evidence_ids = _text_list(raw.get("evidence_ids"), limit=4, length=80)
+        if not description or not evidence_ids or len(evidence_ids) != len(set(evidence_ids)):
+            raise AiAnalysisError("AI 动态规则缺少说明或历史依据")
+        evidence = [catalog.get(evidence_id) for evidence_id in evidence_ids]
+        if any(item is None for item in evidence):
+            raise AiAnalysisError("AI 动态规则引用了不存在的历史依据")
+        if not any(profile_field in item["supports"] for item in evidence if item):
+            raise AiAnalysisError("AI 动态规则没有对应的可核对依据")
+
+        rule = {"field": field, "description": description, "evidence_ids": evidence_ids}
+        if field in {"odd_count", "small_count", "sum"}:
+            minimum = _rule_integer(raw.get("min"), f"{field}.min")
+            maximum = _rule_integer(raw.get("max"), f"{field}.max")
+            legal_min, legal_max = (0, red_count)
+            if field == "sum":
+                legal_min, legal_max = profile["sum_range"]
+            if minimum > maximum or minimum < legal_min or maximum > legal_max:
+                raise AiAnalysisError(f"AI 动态规则的{field}范围无效")
+            rule.update({"min": minimum, "max": maximum})
+            profile[profile_field] = [minimum, maximum]
+        elif field == "zone_minimums":
+            values = raw.get("values")
+            if not isinstance(values, list) or len(values) != 3:
+                raise AiAnalysisError("AI 动态规则的zone_minimums格式错误")
+            values = [_rule_integer(item, "zone_minimums") for item in values]
+            if any(item < 0 or item > red_count for item in values) or sum(values) > red_count:
+                raise AiAnalysisError("AI 动态规则的zone_minimums范围无效")
+            rule["values"] = values
+            profile[profile_field] = values
+        else:
+            maximum = _rule_integer(raw.get("max"), "max_consecutive_run.max")
+            if not 1 <= maximum <= red_count:
+                raise AiAnalysisError("AI 动态规则的max_consecutive_run范围无效")
+            rule["max"] = maximum
+            profile[profile_field] = maximum
+
+        normalized.append(rule)
+
+    profile["active_fields"] = [DYNAMIC_RULE_FIELDS[item["field"]] for item in normalized]
+    return normalized, profile
 
 
 def _most_common_value(items: list[dict], field: str):
@@ -511,6 +632,8 @@ def build_profile_evidence_catalog(snapshot: dict) -> list[dict]:
 
 
 def _profile_is_feasible(profile: dict, *, red_count: int) -> bool:
+    if not profile.get("active_fields"):
+        return True
     odd_low, odd_high = profile["odd_range"]
     small_low, small_high = profile["small_range"]
     sum_low, sum_high = profile["sum_range"]
@@ -607,7 +730,7 @@ def _profile_is_feasible(profile: dict, *, red_count: int) -> bool:
     )
 
 
-def _validated_profile_evidence(value, snapshot: dict) -> list[dict]:
+def _validated_profile_evidence(value, snapshot: dict, *, required_fields: set[str]) -> list[dict]:
     if not isinstance(value, list):
         raise AiAnalysisError("AI 未返回结构化的历史依据")
     catalog = {item["id"]: item for item in build_profile_evidence_catalog(snapshot)}
@@ -629,41 +752,61 @@ def _validated_profile_evidence(value, snapshot: dict) -> list[dict]:
     supported = {field for item in normalized for field in item["supports"]}
     if not EVIDENCE_SOURCES <= sources:
         raise AiAnalysisError("AI 历史依据必须覆盖统计、走势、形态和回测")
-    if not PROFILE_FIELDS <= supported:
-        raise AiAnalysisError("AI 历史依据未覆盖全部动态形态口径")
+    if not required_fields <= supported:
+        raise AiAnalysisError("AI 历史依据未覆盖本次启用的动态规则")
     return normalized
 
 
-def validate_analysis_profile(value: dict, snapshot: dict, *, red_count: int) -> dict:
+def validate_analysis_profile(
+    value: dict,
+    snapshot: dict,
+    *,
+    red_count: int,
+    shape_filter: bool = True,
+) -> dict:
     if not isinstance(value, dict):
         raise AiAnalysisError("AI 第一阶段返回内容不是 JSON 对象")
-    forbidden = {"red", "blue", "red_reasons", "blue_reasons", "structure_rationale"} & value.keys()
+    forbidden = {"red", "dan", "tuo", "blue", "red_reasons", "blue_reasons", "structure_rationale"} & value.keys()
     if forbidden:
         raise AiAnalysisError("AI 第一阶段不得返回候选号码或选号理由")
 
     summary = str(value.get("summary", "")).strip()[:600]
     selection_rules = _text_list(value.get("selection_rules"), limit=6, length=240)
-    dynamic_profile = _dynamic_profile(value.get("dynamic_profile"), red_count=red_count)
+    dynamic_rules, dynamic_profile = _normalize_dynamic_rules(
+        value.get("dynamic_rules"),
+        snapshot,
+    )
+    strategy_assessment = str(value.get("strategy_assessment", "")).strip()[:600]
     backtest_conclusion = str(value.get("backtest_conclusion", "")).strip()[:600]
     risk_note = str(value.get("risk_note", "")).strip()[:400]
-    profile_evidence = _validated_profile_evidence(value.get("profile_evidence"), snapshot)
+    profile_evidence = _validated_profile_evidence(
+        value.get("profile_evidence"),
+        snapshot,
+        required_fields=set(dynamic_profile["active_fields"]),
+    )
 
     if not summary:
         raise AiAnalysisError("AI 未返回历史分析摘要")
-    if len(selection_rules) < 2:
-        raise AiAnalysisError("AI 未返回至少两条本期动态规则")
+    if not selection_rules:
+        raise AiAnalysisError("AI 未返回本期选号策略")
+    if shape_filter and not dynamic_rules:
+        raise AiAnalysisError("开启形态过滤时 AI 至少要选择一条可校验动态规则")
+    if not strategy_assessment:
+        raise AiAnalysisError("AI 未核对页面选择的策略方向")
     if not backtest_conclusion:
         raise AiAnalysisError("AI 未返回滚动回测结论")
     if not risk_note:
         raise AiAnalysisError("AI 未返回随机概率风险边界")
-    if not _profile_is_feasible(dynamic_profile, red_count=red_count):
-        raise AiAnalysisError("AI 生成的动态口径无可满足的红球组合")
+    if not _profile_is_feasible(dynamic_profile, red_count=RED_DRAW_COUNT):
+        raise AiAnalysisError("AI 生成的动态口径无可满足的6红单注组合")
 
     return {
         "summary": summary,
         "selection_rules": selection_rules,
+        "dynamic_rules": dynamic_rules,
         "dynamic_profile": dynamic_profile,
         "profile_evidence": profile_evidence,
+        "strategy_assessment": strategy_assessment,
         "backtest_conclusion": backtest_conclusion,
         "risk_note": risk_note,
     }
@@ -686,6 +829,79 @@ def _reason_map(value) -> dict[int, str]:
     return result
 
 
+PREDICTIVE_REASON_TERMS = (
+    "该出",
+    "回补",
+    "延续",
+    "有望",
+    "看好",
+    "更可能",
+    "提高中奖",
+    "必中",
+    "必出",
+    "稳胆",
+)
+
+
+def _validate_reason_language(reasons: dict[int, str], *, field: str) -> None:
+    for number, reason in reasons.items():
+        matched = next((term for term in PREDICTIVE_REASON_TERMS if term in reason), "")
+        if matched:
+            raise AiAnalysisError(f"AI {field}{number:02d}理由包含预测性措辞“{matched}”")
+
+
+def _ticket_profile_violations(tickets: list[list[int]], profile: dict) -> list[str]:
+    if not tickets:
+        return ["没有可展开的合法6红组合"]
+    structures = [shape_metrics(ticket) for ticket in tickets]
+    active_fields = set(profile.get("active_fields", PROFILE_FIELDS))
+    violations = []
+
+    odd_values = [int(item["odd_even"].split(":", 1)[0]) for item in structures]
+    if "odd_range" in active_fields:
+        invalid = [value for value in odd_values if not profile["odd_range"][0] <= value <= profile["odd_range"][1]]
+        if invalid:
+            violations.append(
+                f"单注奇数范围{min(odd_values)}-{max(odd_values)}不全在{profile['odd_range']}"
+            )
+
+    small_values = [int(item["small_large"].split(":", 1)[0]) for item in structures]
+    if "small_range" in active_fields:
+        invalid = [value for value in small_values if not profile["small_range"][0] <= value <= profile["small_range"][1]]
+        if invalid:
+            violations.append(
+                f"单注小号范围{min(small_values)}-{max(small_values)}不全在{profile['small_range']}"
+            )
+
+    if "zone_minimums" in active_fields:
+        invalid_count = sum(
+            any(actual < minimum for actual, minimum in zip(zone_counts(ticket), profile["zone_minimums"]))
+            for ticket in tickets
+        )
+        if invalid_count:
+            violations.append(
+                f"{invalid_count}/{len(tickets)}组6红的三区低于下限{profile['zone_minimums']}"
+            )
+
+    sums = [item["sum"] for item in structures]
+    if "sum_range" in active_fields:
+        invalid = [value for value in sums if not profile["sum_range"][0] <= value <= profile["sum_range"][1]]
+        if invalid:
+            violations.append(
+                f"单注和值范围{min(sums)}-{max(sums)}不全在{profile['sum_range']}"
+            )
+
+    max_run = max(item["max_consecutive"] for item in structures)
+    if "max_consecutive_run" in active_fields and max_run > profile["max_consecutive_run"]:
+        invalid_count = sum(
+            item["max_consecutive"] > profile["max_consecutive_run"] for item in structures
+        )
+        violations.append(
+            f"{invalid_count}/{len(tickets)}组6红最长连号超过{profile['max_consecutive_run']}"
+        )
+    return violations
+
+
 def validate_recommendation(
     value: dict,
     snapshot: dict,
@@ -693,40 +909,42 @@ def validate_recommendation(
     *,
     red_count: int,
     blue_count: int,
+    bet_mode: str = "complex",
+    strategy: str = "balanced",
+    dan_count: int = 0,
+    tuo_count: int = 0,
 ) -> dict:
     if not isinstance(value, dict):
         raise AiAnalysisError("AI 第二阶段返回内容不是 JSON 对象")
     frozen_fields = {
         "summary",
         "selection_rules",
+        "dynamic_rules",
         "dynamic_profile",
         "profile_evidence",
+        "strategy_assessment",
         "backtest_conclusion",
         "risk_note",
     }
     if frozen_fields & value.keys():
         raise AiAnalysisError("AI 第二阶段不得返回或改写已冻结的分析规则")
 
-    red = _coerce_number_list(value.get("red"), count=red_count, minimum=1, maximum=RED_MAX, field="红球")
+    dan = []
+    tuo = []
+    if bet_mode == "dantuo":
+        dan = _coerce_number_list(value.get("dan"), count=dan_count, minimum=1, maximum=RED_MAX, field="胆码")
+        tuo = _coerce_number_list(value.get("tuo"), count=tuo_count, minimum=1, maximum=RED_MAX, field="拖码")
+        if set(dan) & set(tuo):
+            raise AiAnalysisError("AI 返回的胆码和拖码重复")
+        red = sorted(dan + tuo)
+    else:
+        red = _coerce_number_list(value.get("red"), count=red_count, minimum=1, maximum=RED_MAX, field="红球")
     blue = _coerce_number_list(value.get("blue"), count=blue_count, minimum=1, maximum=BLUE_MAX, field="蓝球")
     structure = shape_metrics(red)
+    tickets = expanded_red_tickets(red, bet_mode=bet_mode, dan=dan, tuo=tuo)
+    ticket_structure = ticket_structure_summary(tickets)
     dynamic_profile = frozen_analysis["dynamic_profile"]
-    odd = sum(number % 2 for number in red)
-    small = sum(number <= 16 for number in red)
-    zones = zone_counts(red)
-    profile_violations = []
-    if not dynamic_profile["odd_range"][0] <= odd <= dynamic_profile["odd_range"][1]:
-        profile_violations.append(f"奇数{odd}不在{dynamic_profile['odd_range']}")
-    if not dynamic_profile["small_range"][0] <= small <= dynamic_profile["small_range"][1]:
-        profile_violations.append(f"小号{small}不在{dynamic_profile['small_range']}")
-    if any(actual < minimum for actual, minimum in zip(zones, dynamic_profile["zone_minimums"])):
-        profile_violations.append(f"三区{zones}低于下限{dynamic_profile['zone_minimums']}")
-    if not dynamic_profile["sum_range"][0] <= structure["sum"] <= dynamic_profile["sum_range"][1]:
-        profile_violations.append(f"和值{structure['sum']}不在{dynamic_profile['sum_range']}")
-    if structure["max_consecutive"] > dynamic_profile["max_consecutive_run"]:
-        profile_violations.append(
-            f"最长连号{structure['max_consecutive']}超过{dynamic_profile['max_consecutive_run']}"
-        )
+    profile_violations = _ticket_profile_violations(tickets, dynamic_profile)
     if profile_violations:
         raise AiAnalysisError(f"AI 号码不符合其本期动态口径：{'；'.join(profile_violations)}")
 
@@ -734,6 +952,8 @@ def validate_recommendation(
     blue_stats = {item["number"]: item for item in snapshot["blue_statistics"]}
     red_reasons = _reason_map(value.get("red_reasons"))
     blue_reasons = _reason_map(value.get("blue_reasons"))
+    _validate_reason_language(red_reasons, field="红球")
+    _validate_reason_language(blue_reasons, field="蓝球")
     model_structure_rationale = str(value.get("structure_rationale", "")).strip()[:600]
     missing_red_reasons = [number for number in red if number not in red_reasons]
     missing_blue_reasons = [number for number in blue if number not in blue_reasons]
@@ -753,49 +973,78 @@ def validate_recommendation(
             "omission": item["omission"],
         }
 
-    return {
+    result = {
         "summary": frozen_analysis["summary"],
         "selection_rules": frozen_analysis["selection_rules"],
+        "dynamic_rules": frozen_analysis["dynamic_rules"],
         "dynamic_profile": dynamic_profile,
         "profile_evidence": frozen_analysis["profile_evidence"],
+        "strategy_assessment": frozen_analysis["strategy_assessment"],
+        "strategy": strategy,
+        "bet_mode": bet_mode,
         "model_structure_rationale": model_structure_rationale,
-        "structure_rationale": factual_structure_rationale(red, snapshot),
+        "structure_rationale": factual_structure_rationale(
+            red,
+            snapshot,
+            bet_mode=bet_mode,
+            dan=dan,
+            tuo=tuo,
+        ),
         "red": red,
         "blue": blue,
         "red_reasons": [explain(number, red_stats, red_reasons) for number in red],
         "blue_reasons": [explain(number, blue_stats, blue_reasons) for number in blue],
         "structure": structure,
+        "ticket_structure": ticket_structure,
         "backtest_conclusion": frozen_analysis["backtest_conclusion"],
         "risk_note": frozen_analysis["risk_note"],
     }
+    if bet_mode == "dantuo":
+        result.update({"dan": dan, "tuo": tuo})
+    return result
 
 
-def build_messages(snapshot: dict, *, red_count: int, blue_count: int, shape_filter: bool, avoid_popular: bool) -> list[dict]:
+def build_messages(
+    snapshot: dict,
+    *,
+    red_count: int,
+    blue_count: int,
+    shape_filter: bool,
+    avoid_popular: bool,
+    strategy: str = "balanced",
+    bet_mode: str = "complex",
+    dan_count: int = 0,
+    tuo_count: int = 0,
+) -> list[dict]:
     output_schema = {
-        "summary": "非空字符串：基于所给数据的历史分析摘要",
-        "selection_rules": "数组：2-6条由本次报告动态生成的规则字符串",
-        "dynamic_profile": {
-            "odd_range": f"数组：本期{red_count}红池允许的奇数个数最小值和最大值",
-            "small_range": f"数组：本期{red_count}红池允许的01-16个数最小值和最大值",
-            "zone_minimums": "数组：本期红池在01-11、12-22、23-33三区各自的最少个数",
-            "sum_range": f"数组：本期{red_count}红池和值最小值和最大值",
-            "max_consecutive_run": f"整数：本期{red_count}红池允许的最长连号",
-        },
-        "profile_evidence": "数组：7-12个{id必须来自evidence_catalog,reason非空字符串}对象，覆盖统计、走势、形态、回测及全部动态口径",
-        "backtest_conclusion": "非空字符串：比较回测值与随机期望，不夸大样本偏差",
-        "risk_note": "非空字符串：说明每个合法组合概率相同且不保证中奖",
+        "summary": "不超过300字：基于所给数据的历史分析摘要",
+        "strategy_assessment": "不超过300字：结合回测说明保留、弱化或否定页面所选策略方向",
+        "selection_rules": "数组：3-5条、每条不超过100字的选号与覆盖取舍，不得暗示预测优势",
+        "dynamic_rules": (
+            "数组：自行选择0-5种机器规则且field不得重复。可选格式："
+            "{field:'odd_count'|'small_count'|'sum',min整数,max整数,description字符串,evidence_ids数组}；"
+            "{field:'zone_minimums',values:[整数,整数,整数],description字符串,evidence_ids数组}；"
+            "{field:'max_consecutive_run',max整数,description字符串,evidence_ids数组}。"
+            "每条 description 不超过100字，evidence_ids 必须至少含一个直接支持该 field 的 evidence_catalog id"
+        ),
+        "profile_evidence": "数组：7-10个{id必须来自evidence_catalog,reason不超过100字}对象，覆盖统计、走势、形态、回测及本次实际启用的规则",
+        "backtest_conclusion": "不超过300字：比较回测值与随机期望，不夸大样本偏差",
+        "risk_note": "不超过180字：说明每个合法组合概率相同且不保证中奖",
     }
     system = (
         "你是双色球历史研究助手。你只能使用用户消息里的真实 JSON 数据，不能补造开奖、频次、遗漏或回测结果。"
         "双色球是独立随机开奖，每个合法单式组合概率相同；历史标签只用于组合结构和覆盖分散，不能称为预测优势。"
-        "先比较近期与长期统计、历史形态分布、最近20期走势及30/50期滚动回测，再自行归纳本期动态选号规则。"
-        "这是第一阶段，只生成分析报告和 dynamic_profile，严禁选号，严禁返回 red、blue、逐号理由或任何候选号码。"
-        "除号码数量、范围和不重复外，不得预设固定奇偶、大小、三区、和值或连号阈值。"
-        "如果 constraints.shape_analysis_requested 为 true，应结合 research_data.shape_history 做软性取舍；"
-        "极端形态也是合法组合，是否约束必须由本次报告决定。"
+        "先比较近期与长期统计、历史形态分布、最近20期走势及30/50期滚动回测，再自行归纳本期规则。"
+        "页面所选策略只是一项待检验的研究方向；必须结合回测决定保留、弱化或否定，不能盲从。"
+        "奇偶、大小、三区、和值和连号的历史统计都来自每期6个红球，因此动态规则必须针对每一组实际展开的6红组合，不能直接套在更大的红球池上。"
+        "复式要同时考虑全部C(红球池,6)组合；胆拖只考虑胆码全选、再从拖码补足6红的合法组合。"
+        "这是第一阶段，只生成分析报告和 dynamic_rules，严禁选号，严禁返回 red、dan、tuo、blue、逐号理由或任何候选号码。"
+        "除玩法合法性外，服务端不会要求奇偶、大小、三区、和值或连号全部启用；你必须自行决定启用哪些规则类型。"
+        "如果 constraints.shape_analysis_requested 为 false，可以返回空 dynamic_rules；否则至少选择一条有直接证据且可满足的规则。"
+        "极端形态也是合法组合，未启用的规则类型不得在第二阶段被当作隐藏硬约束。"
         "profile_evidence 只能引用 evidence_catalog 中的 id，服务端会用原始数值复核；不要自行抄写或编造统计数值。"
         "禁止用该出、回补、延续、有望、看好或提高中奖概率等措辞暗示未来更容易开出；只能描述历史覆盖取舍。"
-        "summary、selection_rules、dynamic_profile、profile_evidence、backtest_conclusion和risk_note必须完整返回。"
+        "summary、strategy_assessment、selection_rules、dynamic_rules、profile_evidence、backtest_conclusion和risk_note必须完整返回。"
         "只输出合法 JSON，不要 Markdown，不要思维过程。"
     )
     constraints = {
@@ -805,16 +1054,28 @@ def build_messages(snapshot: dict, *, red_count: int, blue_count: int, shape_fil
         "blue_range": [1, BLUE_MAX],
         "red_unique": True,
         "blue_unique": True,
+        "bet_mode": bet_mode,
+        "dan_count": dan_count,
+        "tuo_count": tuo_count,
+        "selected_strategy": strategy,
+        "selected_strategy_policy": STRATEGY_POLICIES[strategy],
         "shape_analysis_requested": shape_filter,
-        "structure_policy": "根据历史形态分布动态判断，不使用固定比例或硬阈值",
-        "dynamic_profile_applies_to_full_red_pool": red_count,
+        "structure_policy": "根据本次证据自行选择规则类型和阈值，不使用固定规则模板",
+        "dynamic_rules_apply_to": "every_expanded_6_red_ticket",
+        "expanded_red_ticket_count": red_ticket_count_for_mode(
+            bet_mode=bet_mode,
+            red_count=red_count,
+            dan_count=dan_count,
+            tuo_count=tuo_count,
+        ),
+        "available_dynamic_rule_fields": list(DYNAMIC_RULE_FIELDS),
         "avoid_popular_is_only_split_risk_hint": avoid_popular,
         "consecutive_numbers_are_allowed": True,
         "required_output_schema": output_schema,
     }
     user = {
         "stage": "analysis_profile",
-        "task": "分析历史统计、走势、形态分布和滚动回测，只生成本期动态规则，不生成号码",
+        "task": "分析历史统计、走势、形态分布和滚动回测，核对所选策略并生成本期规则，不生成号码",
         "constraints": constraints,
         "evidence_catalog": build_profile_evidence_catalog(snapshot),
         "research_data": snapshot,
@@ -832,19 +1093,31 @@ def build_selection_messages(
     red_count: int,
     blue_count: int,
     avoid_popular: bool = False,
+    strategy: str = "balanced",
+    bet_mode: str = "complex",
+    dan_count: int = 0,
+    tuo_count: int = 0,
 ) -> list[dict]:
     output_schema = {
-        "structure_rationale": "非空字符串：说明号码如何满足已冻结的动态口径",
-        "red": f"数组：恰好{red_count}个1-33不重复整数",
+        "structure_rationale": "非空字符串：说明实际展开的每组6红组合如何满足已冻结的动态口径",
         "blue": f"数组：恰好{blue_count}个1-16不重复整数",
-        "red_reasons": "数组：red中每个号码各一个{number整数,reason非空字符串}对象",
+        "red_reasons": "数组：全部红球池中每个号码各一个{number整数,reason非空字符串}对象",
         "blue_reasons": "数组：blue中每个号码各一个{number整数,reason非空字符串}对象",
     }
+    if bet_mode == "dantuo":
+        output_schema.update({
+            "dan": f"数组：恰好{dan_count}个1-33不重复胆码",
+            "tuo": f"数组：恰好{tuo_count}个1-33不重复拖码，与dan不重复",
+        })
+    else:
+        output_schema["red"] = f"数组：恰好{red_count}个1-33不重复整数"
     system = (
         "你是双色球历史研究助手。这是第二阶段，服务端已冻结第一阶段的分析和动态口径。"
-        "你只能在 frozen_analysis.dynamic_profile 内选号，不得返回、重申或修改 summary、selection_rules、dynamic_profile、profile_evidence、backtest_conclusion 或 risk_note。"
+        "你只能按 frozen_analysis.dynamic_rules 选号，不得返回、重申或修改 summary、strategy_assessment、selection_rules、dynamic_rules、dynamic_profile、profile_evidence、backtest_conclusion 或 risk_note。"
         "红蓝球理由只能使用给定的真实统计做定性取舍，不得补造数字，不得暗示提高中奖概率。"
-        "输出前必须逐个核对红球奇数个数、01-16个数、三区数量、和值和最长连号，确保全部符合 server_validation_checklist；校验失败时必须更换号码。"
+        "只核对 server_validation_checklist 中实际启用的规则；未启用的形态字段不得被当作隐藏硬约束。"
+        "冻结规则针对每一组实际展开的6红组合：复式检查全部C(红球池,6)，胆拖检查胆码全选并从拖码补足6红的全部组合；不能只检查整个红球池。"
+        "胆拖必须明确区分胆码和拖码；胆码只是投注结构，不得声称其更可能开出。"
         "只输出 required_output_schema 中的字段和合法 JSON，不要 Markdown，不要思维过程。"
     )
     user = {
@@ -857,17 +1130,22 @@ def build_selection_messages(
             "blue_range": [1, BLUE_MAX],
             "red_unique": True,
             "blue_unique": True,
+            "bet_mode": bet_mode,
+            "dan_count": dan_count,
+            "tuo_count": tuo_count,
+            "dynamic_rules_apply_to": "every_expanded_6_red_ticket",
+            "expanded_red_ticket_count": red_ticket_count_for_mode(
+                bet_mode=bet_mode,
+                red_count=red_count,
+                dan_count=dan_count,
+                tuo_count=tuo_count,
+            ),
+            "selected_strategy": strategy,
             "avoid_popular_is_only_split_risk_hint": avoid_popular,
             "required_output_schema": output_schema,
         },
         "frozen_analysis": frozen_analysis,
-        "server_validation_checklist": {
-            "odd_count_range": frozen_analysis["dynamic_profile"]["odd_range"],
-            "small_01_16_count_range": frozen_analysis["dynamic_profile"]["small_range"],
-            "zone_01_11_12_22_23_33_minimums": frozen_analysis["dynamic_profile"]["zone_minimums"],
-            "red_sum_range": frozen_analysis["dynamic_profile"]["sum_range"],
-            "maximum_consecutive_run": frozen_analysis["dynamic_profile"]["max_consecutive_run"],
-        },
+        "server_validation_checklist": frozen_analysis["dynamic_rules"],
         "number_research": {
             "latest_draw": snapshot["latest_draw"],
             "red_statistics": snapshot["red_statistics"],
@@ -924,7 +1202,7 @@ def call_deepseek(messages: list[dict], *, timeout: int = 60) -> dict:
         "response_format": {"type": "json_object"},
         "thinking": {"type": "enabled" if request_stage == "number_selection" else "disabled"},
         "temperature": 0.25,
-        "max_tokens": 6000 if request_stage == "number_selection" else 3200,
+        "max_tokens": 6000 if request_stage == "number_selection" else 4000,
         "stream": False,
         "user_id": "ssq-research",
     }
@@ -971,10 +1249,15 @@ def _request_stage(
         except AiResponseError as exc:
             last_error = exc
             if attempt < max_attempts - 1:
+                retry_instruction = (
+                    "上次 JSON 因内容过长被截断。请严格遵守各字段字数上限，压缩说明并重新输出完整 JSON 对象。"
+                    if "截断" in str(exc)
+                    else "上次没有返回有效 JSON。请按原约束重新输出完整 JSON 对象。"
+                )
                 current_messages = current_messages + [
                     {
                         "role": "user",
-                        "content": f"{stage_name}上次没有返回有效 JSON。请按原约束重新输出完整 JSON 对象。",
+                        "content": f"{stage_name}{retry_instruction}",
                     }
                 ]
                 continue
@@ -1002,10 +1285,33 @@ def generate_ai_recommendation(
     blue_count: int = 2,
     shape_filter: bool = True,
     avoid_popular: bool = True,
+    strategy: str = "balanced",
+    bet_mode: str = "complex",
+    dan_count: int = 0,
+    tuo_count: int = 0,
     requester: Callable[[list[dict]], dict] = call_deepseek,
 ) -> dict:
-    if not 6 <= red_count <= 12 or not 1 <= blue_count <= 6:
-        raise AiAnalysisError("AI 推荐数量应为 6-12 个红球、1-6 个蓝球")
+    if strategy not in STRATEGY_POLICIES:
+        raise AiAnalysisError("AI 推荐策略类型无效")
+    if bet_mode not in BET_MODES:
+        raise AiAnalysisError("AI 投注方式无效")
+    if not 1 <= blue_count <= 6:
+        raise AiAnalysisError("AI 推荐蓝球数量应为 1-6 个")
+    if bet_mode == "single":
+        if red_count != 6 or blue_count != 1:
+            raise AiAnalysisError("AI 单式必须为 6 个红球、1 个蓝球")
+    elif bet_mode == "complex":
+        if not 6 <= red_count <= 12:
+            raise AiAnalysisError("AI 复式红球数量应为 6-12 个")
+    else:
+        if not 1 <= dan_count <= 5:
+            raise AiAnalysisError("AI 胆码数量应为 1-5 个")
+        if not max(4, 6 - dan_count) <= tuo_count <= 15:
+            raise AiAnalysisError("AI 拖码数量不足或超出范围")
+        red_count = dan_count + tuo_count
+        if red_count > 20:
+            raise AiAnalysisError("AI 胆拖红球池不能超过 20 个")
+
     snapshot = build_analysis_snapshot(rows, scope)
     analysis_messages = build_messages(
         snapshot,
@@ -1013,11 +1319,20 @@ def generate_ai_recommendation(
         blue_count=blue_count,
         shape_filter=shape_filter,
         avoid_popular=avoid_popular,
+        strategy=strategy,
+        bet_mode=bet_mode,
+        dan_count=dan_count,
+        tuo_count=tuo_count,
     )
     frozen_analysis = _request_stage(
         requester,
         analysis_messages,
-        lambda raw: validate_analysis_profile(raw, snapshot, red_count=red_count),
+        lambda raw: validate_analysis_profile(
+            raw,
+            snapshot,
+            red_count=red_count,
+            shape_filter=shape_filter,
+        ),
         stage_name="AI 分析阶段",
     )
     selection_messages = build_selection_messages(
@@ -1026,6 +1341,10 @@ def generate_ai_recommendation(
         red_count=red_count,
         blue_count=blue_count,
         avoid_popular=avoid_popular,
+        strategy=strategy,
+        bet_mode=bet_mode,
+        dan_count=dan_count,
+        tuo_count=tuo_count,
     )
     recommendation = _request_stage(
         requester,
@@ -1036,11 +1355,26 @@ def generate_ai_recommendation(
             frozen_analysis,
             red_count=red_count,
             blue_count=blue_count,
+            bet_mode=bet_mode,
+            strategy=strategy,
+            dan_count=dan_count,
+            tuo_count=tuo_count,
         ),
         stage_name="AI 选号阶段",
         max_attempts=3,
     )
 
+    request_config = {
+        "scope": scope,
+        "strategy": strategy,
+        "bet_mode": bet_mode,
+        "red_count": red_count,
+        "blue_count": blue_count,
+        "dan_count": dan_count,
+        "tuo_count": tuo_count,
+        "shape_filter": shape_filter,
+        "avoid_popular": avoid_popular,
+    }
     return {
         "recommendation": recommendation,
         "research": {
@@ -1050,7 +1384,12 @@ def generate_ai_recommendation(
             "shape_history": snapshot["shape_history"],
             "backtests": snapshot["backtests"],
         },
-        "pipeline": {"mode": "two_stage", "analysis_frozen_before_selection": True},
+        "request": request_config,
+        "pipeline": {
+            "mode": "two_stage",
+            "analysis_frozen_before_selection": True,
+            "rules_selected_dynamically": True,
+        },
         "model": os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "disclaimer": "历史统计、走势图和回测不能预测随机开奖；推荐只用于研究和组合结构参考。",

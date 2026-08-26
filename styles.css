@@ -559,6 +559,55 @@ button:disabled {
   margin-bottom: 0;
 }
 
+.ai-history-head {
+  margin-top: 22px;
+}
+
+.ai-history {
+  display: grid;
+  gap: 8px;
+}
+
+.ai-history-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fbfcfe;
+}
+
+.ai-history-item > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ai-history-item span,
+.ai-history-item p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ai-history-item p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ai-history-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.ai-history-actions button {
+  min-height: 34px;
+  padding: 0 12px;
+}
+
 .research-table {
   max-width: 100%;
   overflow-x: auto;
@@ -1201,6 +1250,19 @@ th {
   .ai-meta {
     min-width: 0;
     text-align: left;
+  }
+
+  .ai-history-item {
+    display: grid;
+    align-items: start;
+  }
+
+  .ai-history-actions {
+    width: 100%;
+  }
+
+  .ai-history-actions button {
+    flex: 1;
   }
 
   .metric strong {

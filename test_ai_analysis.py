@@ -32,13 +32,14 @@ def sample_rows(count=70):
     return rows
 
 
-def broad_profile(red_count=7):
+def broad_profile(red_count=6):
     return {
         "odd_range": [0, red_count],
         "small_range": [0, red_count],
         "zone_minimums": [0, 0, 0],
         "sum_range": [sum(range(1, red_count + 1)), sum(range(34 - red_count, 34))],
         "max_consecutive_run": red_count,
+        "active_fields": ["odd_range"],
     }
 
 
@@ -52,10 +53,55 @@ def valid_analysis_response(profile=None):
         "trend.consecutive_draw_rate",
         "backtest.red_hot_top8.30",
     ]
+    if profile is None:
+        dynamic_rules = [{
+            "field": "odd_count",
+            "min": 0,
+            "max": 6,
+            "description": "本期只启用宽范围奇数规则，其余形态不作硬约束",
+            "evidence_ids": ["shape.common_odd"],
+        }]
+    else:
+        dynamic_rules = [
+            {
+                "field": "odd_count",
+                "min": profile["odd_range"][0],
+                "max": profile["odd_range"][1],
+                "description": "按历史奇偶分布设置范围",
+                "evidence_ids": ["shape.common_odd"],
+            },
+            {
+                "field": "small_count",
+                "min": profile["small_range"][0],
+                "max": profile["small_range"][1],
+                "description": "按历史大小分布设置范围",
+                "evidence_ids": ["shape.common_small"],
+            },
+            {
+                "field": "zone_minimums",
+                "values": profile["zone_minimums"],
+                "description": "按历史三区分布设置下限",
+                "evidence_ids": ["shape.common_zone"],
+            },
+            {
+                "field": "sum",
+                "min": profile["sum_range"][0],
+                "max": profile["sum_range"][1],
+                "description": "按历史和值区间设置范围",
+                "evidence_ids": ["shape.sum_middle_band"],
+            },
+            {
+                "field": "max_consecutive_run",
+                "max": profile["max_consecutive_run"],
+                "description": "按近期连号比例设置上限",
+                "evidence_ids": ["trend.consecutive_draw_rate"],
+            },
+        ]
     return {
         "summary": "基于历史统计、走势与回测的研究摘要",
-        "selection_rules": ["规则来自本次历史报告", "形态只作动态取舍"],
-        "dynamic_profile": profile or broad_profile(),
+        "strategy_assessment": "所选方向仅作研究假设，回测不支持时予以弱化",
+        "selection_rules": ["规则来自本次历史报告", "只执行本期实际启用的动态规则"],
+        "dynamic_rules": dynamic_rules,
         "profile_evidence": [
             {"id": evidence_id, "reason": "引用服务端报告作为本期口径依据"}
             for evidence_id in evidence_ids
@@ -88,7 +134,7 @@ class AiAnalysisTests(unittest.TestCase):
 
     def freeze(self, response=None, red_count=7):
         return validate_analysis_profile(
-            response or valid_analysis_response(broad_profile(red_count)),
+            response or valid_analysis_response(),
             self.snapshot,
             red_count=red_count,
         )
@@ -111,6 +157,10 @@ class AiAnalysisTests(unittest.TestCase):
         self.assertNotIn("required_output_example", payload["constraints"])
         self.assertIn("严禁选号", messages[0]["content"])
         self.assertTrue(payload["evidence_catalog"])
+        self.assertIn("dynamic_rules", schema)
+        self.assertNotIn("dynamic_profile", schema)
+        self.assertEqual(payload["constraints"]["dynamic_rules_apply_to"], "every_expanded_6_red_ticket")
+        self.assertEqual(payload["constraints"]["expanded_red_ticket_count"], 7)
 
     def test_stage2_receives_frozen_profile_and_cannot_output_it(self):
         frozen = self.freeze()
@@ -125,7 +175,8 @@ class AiAnalysisTests(unittest.TestCase):
 
         self.assertEqual(payload["stage"], "number_selection")
         self.assertEqual(payload["frozen_analysis"]["dynamic_profile"], frozen["dynamic_profile"])
-        self.assertEqual(payload["server_validation_checklist"]["odd_count_range"], [0, 7])
+        self.assertEqual(payload["server_validation_checklist"], frozen["dynamic_rules"])
+        self.assertEqual(payload["constraints"]["expanded_red_ticket_count"], 7)
         self.assertNotIn("dynamic_profile", schema)
         self.assertEqual(set(schema), {"structure_rationale", "red", "blue", "red_reasons", "blue_reasons"})
 
@@ -192,7 +243,7 @@ class AiAnalysisTests(unittest.TestCase):
             calls.append(message_stage(messages))
             return invalid
 
-        with self.assertRaisesRegex(AiAnalysisError, "动态规则"):
+        with self.assertRaisesRegex(AiAnalysisError, "选号策略"):
             generate_ai_recommendation(self.rows, requester=requester)
         self.assertEqual(calls, ["analysis_profile", "analysis_profile"])
 
@@ -223,7 +274,10 @@ class AiAnalysisTests(unittest.TestCase):
             calls,
             ["analysis_profile", "number_selection", "number_selection", "number_selection"],
         )
-        self.assertEqual(result["recommendation"]["dynamic_profile"], constrained)
+        self.assertEqual(
+            result["recommendation"]["dynamic_profile"],
+            {**constrained, "active_fields": ["odd_range", "small_range", "zone_minimums", "sum_range", "max_consecutive_run"]},
+        )
 
     def test_stage2_cannot_return_or_override_dynamic_profile(self):
         frozen = self.freeze()
@@ -258,10 +312,11 @@ class AiAnalysisTests(unittest.TestCase):
 
     def test_invalid_and_unsatisfiable_profiles_are_rejected(self):
         invalid = valid_analysis_response()
-        invalid["dynamic_profile"]["odd_range"] = [5, 2]
-        impossible = valid_analysis_response()
-        impossible["dynamic_profile"]["small_range"] = [0, 0]
-        impossible["dynamic_profile"]["zone_minimums"] = [1, 0, 0]
+        invalid["dynamic_rules"][0].update({"min": 5, "max": 2})
+        impossible_profile = broad_profile()
+        impossible_profile["small_range"] = [0, 0]
+        impossible_profile["zone_minimums"] = [1, 0, 0]
+        impossible = valid_analysis_response(impossible_profile)
 
         with self.assertRaisesRegex(AiAnalysisError, "范围无效"):
             validate_analysis_profile(invalid, self.snapshot, red_count=7)
@@ -278,6 +333,104 @@ class AiAnalysisTests(unittest.TestCase):
             validate_analysis_profile(candidate, self.snapshot, red_count=7)
         with self.assertRaisesRegex(AiAnalysisError, "无法与服务端报告核对"):
             validate_analysis_profile(unverified, self.snapshot, red_count=7)
+
+    def test_stage1_selects_only_evidence_backed_rule_types(self):
+        frozen = self.freeze()
+        self.assertEqual([item["field"] for item in frozen["dynamic_rules"]], ["odd_count"])
+        self.assertEqual(frozen["dynamic_profile"]["active_fields"], ["odd_range"])
+        self.assertEqual(frozen["dynamic_profile"]["small_range"], [0, 6])
+
+    def test_dantuo_generation_uses_explicit_dan_and_tuo_contract(self):
+        dan = [3, 8]
+        tuo = [14, 16, 20, 27, 33]
+        red = sorted(dan + tuo)
+        selection = {
+            "structure_rationale": "按冻结规则生成胆拖红球池并区分胆码拖码",
+            "dan": dan,
+            "tuo": tuo,
+            "blue": [5, 13],
+            "red_reasons": [{"number": number, "reason": "历史覆盖取舍"} for number in red],
+            "blue_reasons": [{"number": number, "reason": "历史覆盖取舍"} for number in [5, 13]],
+        }
+        responses = iter([valid_analysis_response(), selection])
+        result = generate_ai_recommendation(
+            self.rows,
+            bet_mode="dantuo",
+            red_count=7,
+            blue_count=2,
+            dan_count=2,
+            tuo_count=5,
+            requester=lambda _messages: next(responses),
+        )
+        self.assertEqual(result["recommendation"]["bet_mode"], "dantuo")
+        self.assertEqual(result["recommendation"]["dan"], dan)
+        self.assertEqual(result["recommendation"]["tuo"], tuo)
+        self.assertEqual(result["request"]["dan_count"], 2)
+        self.assertEqual(result["recommendation"]["ticket_structure"]["red_ticket_count"], 5)
+        self.assertIn("按2胆5拖实际展开5组6红组合", result["recommendation"]["structure_rationale"])
+
+    def test_complex_profile_checks_every_expanded_six_red_ticket(self):
+        profile = broad_profile()
+        profile["odd_range"] = [2, 4]
+        frozen = self.freeze(valid_analysis_response(profile))
+        red = [2, 4, 6, 8, 10, 11, 13]
+
+        with self.assertRaisesRegex(AiAnalysisError, "单注奇数范围1-2"):
+            validate_recommendation(
+                valid_selection_response(red=red),
+                self.snapshot,
+                frozen,
+                red_count=7,
+                blue_count=2,
+                bet_mode="complex",
+            )
+
+    def test_dantuo_profile_checks_only_legal_dan_tuo_expansions(self):
+        profile = broad_profile()
+        profile["odd_range"] = [2, 4]
+        frozen = self.freeze(valid_analysis_response(profile))
+        dan = [14, 24]
+        tuo = [5, 7, 16, 22, 30]
+        selection = {
+            "structure_rationale": "逐组检查实际胆拖组合",
+            "dan": dan,
+            "tuo": tuo,
+            "blue": [1, 4],
+            "red_reasons": [
+                {"number": number, "reason": "历史覆盖取舍"}
+                for number in sorted(dan + tuo)
+            ],
+            "blue_reasons": [
+                {"number": number, "reason": "历史覆盖取舍"}
+                for number in [1, 4]
+            ],
+        }
+
+        with self.assertRaisesRegex(AiAnalysisError, "单注奇数范围1-2"):
+            validate_recommendation(
+                selection,
+                self.snapshot,
+                frozen,
+                red_count=7,
+                blue_count=2,
+                bet_mode="dantuo",
+                dan_count=2,
+                tuo_count=5,
+            )
+
+    def test_predictive_language_in_number_reasons_is_rejected(self):
+        frozen = self.freeze()
+        selection = valid_selection_response()
+        selection["blue_reasons"][0]["reason"] = "中高频回补，可提高中奖概率"
+
+        with self.assertRaisesRegex(AiAnalysisError, "预测性措辞"):
+            validate_recommendation(
+                selection,
+                self.snapshot,
+                frozen,
+                red_count=7,
+                blue_count=2,
+            )
 
     def test_request_error_in_stage1_is_not_retried_as_validation_error(self):
         calls = 0
@@ -306,6 +459,24 @@ class AiAnalysisTests(unittest.TestCase):
         result = generate_ai_recommendation(self.rows, requester=requester)
         self.assertEqual(result["recommendation"]["red"], [3, 8, 14, 16, 20, 27, 33])
         self.assertEqual(calls, ["analysis_profile", "analysis_profile", "number_selection"])
+
+    def test_truncated_json_retry_requests_a_shorter_complete_report(self):
+        analysis_calls = 0
+
+        def requester(messages):
+            nonlocal analysis_calls
+            if message_stage(messages) == "number_selection":
+                return valid_selection_response()
+            analysis_calls += 1
+            if analysis_calls == 1:
+                raise AiResponseError("DeepSeek API JSON 输出被截断")
+            self.assertIn("字数上限", messages[-1]["content"])
+            self.assertIn("压缩说明", messages[-1]["content"])
+            return valid_analysis_response()
+
+        result = generate_ai_recommendation(self.rows, requester=requester)
+        self.assertEqual(result["recommendation"]["blue"], [5, 13])
+        self.assertEqual(analysis_calls, 2)
 
     def test_model_json_parser_accepts_fences_and_leading_text(self):
         expected = {"summary": "ok", "red": [1, 2, 3]}

@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import os
 import re
 import secrets
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -28,11 +30,13 @@ PRIVATE_DATA_DIR = Path(os.environ.get("SSQ_PRIVATE_DATA_DIR", ROOT / "data"))
 HISTORY_PATH = Path(os.environ.get("SSQ_HISTORY_PATH", PUBLIC_DATA_DIR / "ssq-history.json"))
 PURCHASES_PATH = Path(os.environ.get("SSQ_PURCHASES_PATH", PRIVATE_DATA_DIR / "purchases.json"))
 RESULTS_PATH = Path(os.environ.get("SSQ_RESULTS_PATH", PRIVATE_DATA_DIR / "check-results.json"))
+AI_DATABASE_PATH = Path(os.environ.get("SSQ_AI_DATABASE_PATH", PRIVATE_DATA_DIR / "ssq.sqlite3"))
 DISPLAY_TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 AI_REQUEST_LOCK = threading.BoundedSemaphore(1)
 AI_USAGE_LOCK = threading.Lock()
 AI_REQUEST_TIMES: list[float] = []
 AI_JOB_LOCK = threading.Lock()
+AI_DATABASE_LOCK = threading.Lock()
 AI_JOBS: dict[str, dict] = {}
 AI_JOB_TTL_SECONDS = 3600
 AI_JOB_MAX_TERMINAL = 100
@@ -52,15 +56,61 @@ def reserve_ai_quota() -> tuple[bool, str]:
     return True, ""
 
 
+def _payload_bool(value, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if type(value) is int and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "on"}:
+        return True
+    if isinstance(value, str) and value.strip().lower() in {"false", "0", "no", "off"}:
+        return False
+    raise ValueError("AI 布尔参数格式错误")
+
+
 def ai_request_options(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("AI 请求格式错误")
+    strategy = str(payload.get("strategy", "balanced")).strip()
+    if strategy not in {"official", "fair", "balanced", "hot", "omission", "cold", "mixed", "random"}:
+        raise ValueError("AI 策略类型无效")
+    bet_mode = str(payload.get("bet_mode", "complex")).strip()
+    if bet_mode not in {"single", "complex", "dantuo"}:
+        raise ValueError("AI 投注方式无效")
+
+    blue_count = int(payload.get("blue_count", 1 if bet_mode == "single" else 2))
+    red_count = int(payload.get("red_count", 6 if bet_mode == "single" else 7))
+    dan_count = int(payload.get("dan_count", 0))
+    tuo_count = int(payload.get("tuo_count", 0))
+    if bet_mode == "single":
+        red_count, blue_count, dan_count, tuo_count = 6, 1, 0, 0
+    elif bet_mode == "complex":
+        if not 6 <= red_count <= 12 or not 1 <= blue_count <= 6:
+            raise ValueError("复式应选择 6-12 个红球、1-6 个蓝球")
+        dan_count = tuo_count = 0
+    else:
+        if not 1 <= dan_count <= 5:
+            raise ValueError("胆码数量应为 1-5 个")
+        if not max(4, 6 - dan_count) <= tuo_count <= 15:
+            raise ValueError("拖码数量不足或超出范围")
+        if dan_count + tuo_count > 20:
+            raise ValueError("胆拖红球池不能超过 20 个")
+        if not 1 <= blue_count <= 6:
+            raise ValueError("蓝球数量应为 1-6 个")
+        red_count = dan_count + tuo_count
+
     return {
         "scope": payload.get("scope", "all"),
-        "red_count": int(payload.get("red_count", 7)),
-        "blue_count": int(payload.get("blue_count", 2)),
-        "shape_filter": bool(payload.get("shape_filter", True)),
-        "avoid_popular": bool(payload.get("avoid_popular", True)),
+        "strategy": strategy,
+        "bet_mode": bet_mode,
+        "red_count": red_count,
+        "blue_count": blue_count,
+        "dan_count": dan_count,
+        "tuo_count": tuo_count,
+        "shape_filter": _payload_bool(payload.get("shape_filter"), default=True),
+        "avoid_popular": _payload_bool(payload.get("avoid_popular"), default=True),
     }
 
 
@@ -106,6 +156,7 @@ def get_ai_job(job_id: str) -> dict | None:
             "status": job["status"],
             "created_at": job["created_at"],
             "updated_at": job["updated_at"],
+            "request": job.get("request", {}),
         }
         if job["status"] == "succeeded":
             payload["result"] = job["result"]
@@ -140,9 +191,18 @@ def _finish_ai_job(job_id: str, *, result: dict | None = None, error: dict | Non
             job["result"] = result
 
 
-def _run_ai_job(job_id: str, options: dict, generator) -> None:
+def _run_ai_job(job_id: str, options: dict, client_request_id: str, generator) -> None:
     try:
         result = generator(read_json(HISTORY_PATH, []), **options)
+        result = dict(result)
+        result["report_id"] = job_id
+        save_ai_recommendation(
+            job_id,
+            task_id=job_id,
+            client_request_id=client_request_id,
+            options=options,
+            result=result,
+        )
         _finish_ai_job(job_id, result=result)
     except AiAnalysisError as exc:
         _finish_ai_job(job_id, error={"code": "ai_analysis_failed", "message": str(exc)})
@@ -167,10 +227,11 @@ def start_ai_job(options: dict, *, client_request_id: str = "", generator=None) 
             "updated_at": timestamp,
             "updated_epoch": time.time(),
             "client_request_id": client_request_id,
+            "request": dict(options),
         }
     worker = threading.Thread(
         target=_run_ai_job,
-        args=(job_id, options, generator or generate_ai_recommendation),
+        args=(job_id, options, client_request_id, generator or generate_ai_recommendation),
         name=f"ssq-ai-{job_id[:8]}",
         daemon=True,
     )
@@ -194,6 +255,158 @@ def write_json(path: Path, data) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def _open_ai_database() -> sqlite3.Connection:
+    AI_DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(AI_DATABASE_PATH, timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_recommendations (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL UNIQUE,
+            client_request_id TEXT,
+            latest_issue TEXT,
+            strategy TEXT NOT NULL,
+            bet_mode TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            model TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_recommendations_created_at ON ai_recommendations(created_at DESC)"
+    )
+    return connection
+
+
+def save_ai_recommendation(
+    report_id: str,
+    *,
+    task_id: str,
+    client_request_id: str,
+    options: dict,
+    result: dict,
+) -> dict:
+    recommendation = (result.get("recommendation") or {}) if isinstance(result, dict) else {}
+    research_data = result.get("research", {}).get("data", {}) if isinstance(result, dict) else {}
+    created_at = str(result.get("generated_at") or _ai_job_timestamp())
+    record = {
+        "id": report_id,
+        "task_id": task_id,
+        "latest_issue": str(research_data.get("latest_issue", "")),
+        "strategy": str(options.get("strategy", recommendation.get("strategy", "balanced"))),
+        "bet_mode": str(options.get("bet_mode", recommendation.get("bet_mode", "complex"))),
+        "request": options,
+        "result": result,
+        "model": str(result.get("model", "")),
+        "created_at": created_at,
+    }
+    with AI_DATABASE_LOCK:
+        with closing(_open_ai_database()) as connection:
+            connection.execute(
+                """
+                INSERT INTO ai_recommendations (
+                    id, task_id, client_request_id, latest_issue, strategy, bet_mode,
+                    request_json, result_json, model, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    latest_issue=excluded.latest_issue,
+                    strategy=excluded.strategy,
+                    bet_mode=excluded.bet_mode,
+                    request_json=excluded.request_json,
+                    result_json=excluded.result_json,
+                    model=excluded.model,
+                    created_at=excluded.created_at
+                """,
+                (
+                    report_id,
+                    task_id,
+                    client_request_id or None,
+                    record["latest_issue"],
+                    record["strategy"],
+                    record["bet_mode"],
+                    json.dumps(options, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+                    record["model"],
+                    created_at,
+                ),
+            )
+            connection.commit()
+    return record
+
+
+def _ai_record_from_row(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "task_id": row["task_id"],
+        "latest_issue": row["latest_issue"] or "",
+        "strategy": row["strategy"],
+        "bet_mode": row["bet_mode"],
+        "request": json.loads(row["request_json"]),
+        "result": json.loads(row["result_json"]),
+        "model": row["model"] or "",
+        "created_at": row["created_at"],
+    }
+
+
+def get_ai_recommendation(report_id: str | None = None) -> dict | None:
+    with AI_DATABASE_LOCK:
+        with closing(_open_ai_database()) as connection:
+            if report_id:
+                row = connection.execute(
+                    "SELECT * FROM ai_recommendations WHERE id = ?",
+                    (report_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM ai_recommendations ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                ).fetchone()
+    return _ai_record_from_row(row) if row else None
+
+
+def list_ai_recommendations(limit: int = 20) -> list[dict]:
+    limit = max(1, min(int(limit), 50))
+    with AI_DATABASE_LOCK:
+        with closing(_open_ai_database()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM ai_recommendations ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    items = []
+    for row in rows:
+        record = _ai_record_from_row(row)
+        recommendation = record["result"].get("recommendation", {})
+        items.append({
+            "id": record["id"],
+            "latest_issue": record["latest_issue"],
+            "strategy": record["strategy"],
+            "bet_mode": record["bet_mode"],
+            "request": record["request"],
+            "model": record["model"],
+            "created_at": record["created_at"],
+            "recommendation": {
+                "summary": recommendation.get("summary", ""),
+                "red": recommendation.get("red", []),
+                "dan": recommendation.get("dan", []),
+                "tuo": recommendation.get("tuo", []),
+                "blue": recommendation.get("blue", []),
+            },
+        })
+    return items
+
+
+def delete_ai_recommendation(report_id: str) -> bool:
+    with AI_DATABASE_LOCK:
+        with closing(_open_ai_database()) as connection:
+            cursor = connection.execute("DELETE FROM ai_recommendations WHERE id = ?", (report_id,))
+            connection.commit()
+    return cursor.rowcount > 0
 
 
 def normalize_nums(value, *, min_value: int, max_value: int, field: str) -> list[int]:
@@ -393,6 +606,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "model": os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
                 })
                 return
+            if method == "GET" and path == "/api/ai/recommendations":
+                limit = int(query.get("limit", ["20"])[-1])
+                self.write_response({"items": list_ai_recommendations(limit)})
+                return
+            if method == "GET" and path == "/api/ai/recommendations/latest":
+                item = get_ai_recommendation()
+                self.write_response({"item": item})
+                return
+            if method == "GET" and path.startswith("/api/ai/recommendations/"):
+                report_id = unquote(path.removeprefix("/api/ai/recommendations/"))
+                self.write_ai_recommendation(report_id)
+                return
             if method == "GET" and path.startswith("/api/ai/tasks/"):
                 self.ai_task_status(unquote(path.removeprefix("/api/ai/tasks/")))
                 return
@@ -411,6 +636,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             if method == "DELETE" and path.startswith("/api/purchases/"):
                 purchase_id = unquote(path.split("/", 3)[3])
                 self.delete_purchase(purchase_id)
+                return
+            if method == "DELETE" and path.startswith("/api/ai/recommendations/"):
+                report_id = unquote(path.removeprefix("/api/ai/recommendations/"))
+                self.delete_ai_recommendation(report_id)
                 return
 
             self.write_response({"error": "not found"}, status=404)
@@ -461,6 +690,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         self.write_response(task)
 
+    def write_ai_recommendation(self, report_id: str) -> None:
+        if not re.fullmatch(r"[-_A-Za-z0-9]{20,64}", report_id):
+            self.write_response({"error": "AI 分析记录不存在"}, status=404)
+            return
+        item = get_ai_recommendation(report_id)
+        if not item:
+            self.write_response({"error": "AI 分析记录不存在"}, status=404)
+            return
+        self.write_response({"item": item})
+
     def write_ai_task_reference(self, task_id: str) -> None:
         task = get_ai_job(task_id) or {"task_id": task_id, "status": "running"}
         task.update({
@@ -495,6 +734,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.write_ai_task_reference(task_id)
                 return
             result = generate_ai_recommendation(read_json(HISTORY_PATH, []), **options)
+            report_id = secrets.token_urlsafe(18)
+            result = dict(result)
+            result["report_id"] = report_id
+            save_ai_recommendation(
+                report_id,
+                task_id=report_id,
+                client_request_id="",
+                options=options,
+                result=result,
+            )
             self.write_response(result)
         except AiAnalysisError as exc:
             self.write_response({"error": str(exc)}, status=502)
@@ -509,6 +758,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.write_response({"error": "purchase not found"}, status=404)
             return
         write_json(PURCHASES_PATH, remaining)
+        self.write_response({"ok": True})
+
+    def delete_ai_recommendation(self, report_id: str) -> None:
+        if not re.fullmatch(r"[-_A-Za-z0-9]{20,64}", report_id) or not delete_ai_recommendation(report_id):
+            self.write_response({"error": "AI 分析记录不存在"}, status=404)
+            return
         self.write_response({"ok": True})
 
     def read_body(self) -> dict:
