@@ -1,7 +1,15 @@
 FROM python:3.12-slim
 
+ARG DEBIAN_MIRROR=https://mirrors.aliyun.com/debian
+ARG DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security
+
 # 安装 cron、时区数据、nginx
-RUN apt-get update \
+RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+      -exec sed -i \
+        "s|http[s]*://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g; \
+         s|http[s]*://security.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g; \
+         s|http[s]*://deb.debian.org/debian|${DEBIAN_MIRROR}|g" {} + \
+    && apt-get update \
     && apt-get install -y --no-install-recommends cron tzdata nginx \
     && rm -rf /var/lib/apt/lists/*
 
