@@ -22,6 +22,7 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY fetch_history.py /app/fetch_history.py
 COPY check_winnings.py /app/check_winnings.py
 COPY purchase_api.py /app/purchase_api.py
+COPY ai_analysis.py /app/ai_analysis.py
 COPY data/purchases.json data/check-results.json /app/private/
 COPY crontab /etc/cron.d/ssq-fetch
 COPY entrypoint.sh /app/entrypoint.sh

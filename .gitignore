@@ -16,3 +16,8 @@ TestResults.xml
 __pycache__/
 *.pyc
 .DS_Store
+
+### Local secrets ###
+.env
+.env.*
+!.env.example

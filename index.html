@@ -24,19 +24,23 @@
             统计范围
             <select id="scopeSelect">
               <option value="20">近 20 期</option>
-              <option value="30" selected>近 30 期</option>
+              <option value="30">近 30 期</option>
               <option value="50">近 50 期</option>
-              <option value="all">全部（近半年）</option>
+              <option value="100" selected>近 100 期</option>
+              <option value="200">近 200 期</option>
+              <option value="all">全部历史</option>
             </select>
           </label>
           <label>
             策略
             <select id="strategySelect">
-              <option value="balanced" selected>均衡覆盖</option>
-              <option value="hot">热号偏向</option>
-              <option value="omission">遗漏回补</option>
-              <option value="cold">冷号逆向</option>
-              <option value="mixed">冷热混合</option>
+              <option value="official">官方机选模拟</option>
+              <option value="fair">概率机选（可过滤）</option>
+              <option value="balanced" selected>AI 3.0 综合</option>
+              <option value="hot">AI 3.0 热号偏向</option>
+              <option value="omission">AI 3.0 遗漏回补</option>
+              <option value="cold">AI 3.0 冷号逆向</option>
+              <option value="mixed">AI 3.0 冷热混合</option>
               <option value="random">纯随机</option>
             </select>
           </label>
@@ -120,6 +124,20 @@
         <div id="qualityPanel" class="quality-panel"></div>
         <div id="numberReasons" class="number-reasons"></div>
         <div id="portfolioPanel" class="portfolio-panel"></div>
+      </section>
+
+      <section class="panel ai-panel wide" aria-label="DeepSeek AI 历史研究推荐">
+        <div class="section-head">
+          <h2>DeepSeek AI 历史研究推荐</h2>
+          <span id="aiStatus">真实统计与回测由服务端计算，AI 先生成并冻结本期规则，再生成号码</span>
+        </div>
+        <div class="actions ai-actions">
+          <button id="aiAnalyzeBtn" type="button">AI 分析并推荐</button>
+          <button id="fillAiBtn" type="button" class="secondary" disabled>填入购买记录</button>
+        </div>
+        <div id="aiRecommendation" class="ai-recommendation">
+          <div class="purchase-empty">等待 AI 历史研究</div>
+        </div>
       </section>
 
       <section class="panel purchase-panel wide" aria-label="购买记录">
@@ -213,6 +231,14 @@
           <span>把开奖历史转成选号参考，不代表预测结果</span>
         </div>
         <div id="historyAnalysis" class="history-analysis"></div>
+      </section>
+
+      <section class="panel wide" aria-label="大样本策略研究">
+        <div class="section-head">
+          <h2>大样本策略研究</h2>
+          <span>滚动回测各方向是否优于随机期望</span>
+        </div>
+        <div id="strategyResearch" class="strategy-research"></div>
       </section>
 
       <section class="panel wide" aria-label="最近开奖走势">

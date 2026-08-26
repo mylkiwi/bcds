@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,8 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
+
+from ai_analysis import AiAnalysisError, DEFAULT_MODEL, generate_ai_recommendation
 
 
 ROOT = Path(__file__).resolve().parent
@@ -24,6 +27,23 @@ HISTORY_PATH = Path(os.environ.get("SSQ_HISTORY_PATH", PUBLIC_DATA_DIR / "ssq-hi
 PURCHASES_PATH = Path(os.environ.get("SSQ_PURCHASES_PATH", PRIVATE_DATA_DIR / "purchases.json"))
 RESULTS_PATH = Path(os.environ.get("SSQ_RESULTS_PATH", PRIVATE_DATA_DIR / "check-results.json"))
 DISPLAY_TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
+AI_REQUEST_LOCK = threading.Lock()
+AI_USAGE_LOCK = threading.Lock()
+AI_REQUEST_TIMES: list[float] = []
+
+
+def reserve_ai_quota() -> tuple[bool, str]:
+    now = time.time()
+    daily_limit = max(1, int(os.environ.get("DEEPSEEK_DAILY_LIMIT", "50")))
+    min_interval = max(0.0, float(os.environ.get("DEEPSEEK_MIN_INTERVAL", "2")))
+    with AI_USAGE_LOCK:
+        AI_REQUEST_TIMES[:] = [value for value in AI_REQUEST_TIMES if value >= now - 86400]
+        if AI_REQUEST_TIMES and now - AI_REQUEST_TIMES[-1] < min_interval:
+            return False, "AI 请求过于频繁，请稍后再试"
+        if len(AI_REQUEST_TIMES) >= daily_limit:
+            return False, "AI 今日调用额度已用完"
+        AI_REQUEST_TIMES.append(now)
+    return True, ""
 
 
 def read_json(path: Path, default):
@@ -205,6 +225,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         try:
+            if method == "GET" and not path.startswith("/api"):
+                self.serve_static(path)
+                return
             if path == "/api/health":
                 self.write_response({"ok": True, "latest": latest_draw()})
                 return
@@ -226,8 +249,17 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "results": read_json(RESULTS_PATH, []),
                 })
                 return
+            if method == "GET" and path == "/api/ai/status":
+                self.write_response({
+                    "configured": bool(os.environ.get("DEEPSEEK_API_KEY", "").strip()),
+                    "model": os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
+                })
+                return
             if method == "POST" and path == "/api/purchases":
                 self.save_purchase()
+                return
+            if method == "POST" and path == "/api/ai/recommendation":
+                self.ai_recommendation()
                 return
             if method == "POST" and path == "/api/check-now":
                 self.write_response(run_check())
@@ -243,6 +275,28 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.write_response({"error": str(exc)}, status=500)
 
+    def serve_static(self, path: str) -> None:
+        allowed = {
+            "/": (ROOT / "index.html", "text/html; charset=utf-8"),
+            "/index.html": (ROOT / "index.html", "text/html; charset=utf-8"),
+            "/styles.css": (ROOT / "styles.css", "text/css; charset=utf-8"),
+            "/app.js": (ROOT / "app.js", "text/javascript; charset=utf-8"),
+            "/data/ssq-history.js": (HISTORY_PATH.with_suffix(".js"), "text/javascript; charset=utf-8"),
+            "/data/ssq-history.json": (HISTORY_PATH, "application/json; charset=utf-8"),
+        }
+        item = allowed.get(path)
+        if not item or not item[0].is_file():
+            self.write_response({"error": "not found"}, status=404)
+            return
+        file_path, content_type = item
+        data = file_path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def save_purchase(self) -> None:
         payload = self.read_body()
         item = validate_purchase(payload)
@@ -252,6 +306,33 @@ class ApiHandler(BaseHTTPRequestHandler):
         purchases.sort(key=lambda row: (str(row.get("issue", "")), str(row.get("id", ""))))
         write_json(PURCHASES_PATH, purchases)
         self.write_response({"item": item, "notification": push_purchase_bark(item)})
+
+    def ai_recommendation(self) -> None:
+        if not os.environ.get("DEEPSEEK_API_KEY", "").strip():
+            self.write_response({"error": "服务端未配置 DeepSeek API"}, status=503)
+            return
+        if not AI_REQUEST_LOCK.acquire(blocking=False):
+            self.write_response({"error": "已有 AI 分析正在进行，请稍后再试"}, status=429)
+            return
+        try:
+            allowed, message = reserve_ai_quota()
+            if not allowed:
+                self.write_response({"error": message}, status=429)
+                return
+            payload = self.read_body()
+            result = generate_ai_recommendation(
+                read_json(HISTORY_PATH, []),
+                scope=payload.get("scope", "all"),
+                red_count=int(payload.get("red_count", 7)),
+                blue_count=int(payload.get("blue_count", 2)),
+                shape_filter=bool(payload.get("shape_filter", True)),
+                avoid_popular=bool(payload.get("avoid_popular", True)),
+            )
+            self.write_response(result)
+        except AiAnalysisError as exc:
+            self.write_response({"error": str(exc)}, status=502)
+        finally:
+            AI_REQUEST_LOCK.release()
 
     def delete_purchase(self, purchase_id: str) -> None:
         purchases = read_json(PURCHASES_PATH, [])
@@ -266,6 +347,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or "0")
         if length <= 0:
             return {}
+        if length > 65536:
+            raise ValueError("请求内容不能超过 64KB")
         raw = self.rfile.read(length).decode("utf-8")
         return json.loads(raw)
 
