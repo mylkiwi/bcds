@@ -30,6 +30,9 @@
     "和值/跨度/连号/断区/同尾/012路/AC值"
   ];
   const TREND_WINDOW = 80;
+  const AI_TASK_STORAGE_KEY = "ssqAiTaskId";
+  const AI_REQUEST_STORAGE_KEY = "ssqAiClientRequestId";
+  const AI_TASK_TIMEOUT_MS = 10 * 60 * 1000;
   const history = normalizeHistory(window.SSQ_HISTORY || []);
   let rng = Math.random;
 
@@ -1272,37 +1275,114 @@
   async function analyzeWithAi() {
     currentAiResult = null;
     els.fillAiBtn.disabled = true;
-    els.aiAnalyzeBtn.disabled = true;
-    els.aiAnalyzeBtn.setAttribute("aria-busy", "true");
-    els.aiAnalyzeBtn.textContent = "AI 分析中...";
+    setAiBusy(true);
     els.aiStatus.textContent = "正在执行先分析、冻结规则、再选号的两阶段 DeepSeek 请求";
     els.aiRecommendation.innerHTML = '<div class="ai-loading">正在分析历史统计、最近走势与滚动回测...</div>';
 
     try {
       const token = requireAdminToken();
-      const counts = aiRecommendationCounts();
-      const data = await apiFetch("/api/ai/recommendation", {
-        method: "POST",
-        token,
-        body: JSON.stringify({
-          scope: els.scopeSelect.value,
-          red_count: counts.redCount,
-          blue_count: counts.blueCount,
-          shape_filter: els.shapeFilter.checked,
-          avoid_popular: els.avoidPopular.checked
-        })
-      });
+      const activeTaskId = sessionStorage.getItem(AI_TASK_STORAGE_KEY) || "";
+      let task;
+      if (activeTaskId) {
+        task = await apiFetch(`/api/ai/tasks/${encodeURIComponent(activeTaskId)}`, { token });
+      } else {
+        const counts = aiRecommendationCounts();
+        const clientRequestId = currentAiClientRequestId();
+        task = await apiFetch("/api/ai/tasks", {
+          method: "POST",
+          token,
+          body: JSON.stringify({
+            scope: els.scopeSelect.value,
+            red_count: counts.redCount,
+            blue_count: counts.blueCount,
+            shape_filter: els.shapeFilter.checked,
+            avoid_popular: els.avoidPopular.checked,
+            client_request_id: clientRequestId
+          })
+        });
+        sessionStorage.setItem(AI_TASK_STORAGE_KEY, task.task_id);
+      }
+      const data = await waitForAiTask(task, token);
       currentAiResult = data;
       renderAiRecommendation(data);
       els.fillAiBtn.disabled = false;
     } catch (error) {
+      if (error.status === 404 || error.taskFailed) {
+        clearAiTaskStorage();
+      }
       els.aiStatus.textContent = "AI 分析未完成";
       els.aiRecommendation.innerHTML = `<div class="purchase-empty">${escapeHtml(error.message)}</div>`;
     } finally {
-      els.aiAnalyzeBtn.disabled = false;
-      els.aiAnalyzeBtn.removeAttribute("aria-busy");
-      els.aiAnalyzeBtn.textContent = "AI 分析并推荐";
+      setAiBusy(false);
     }
+  }
+
+  function setAiBusy(busy) {
+    els.aiAnalyzeBtn.disabled = busy;
+    els.aiAnalyzeBtn.textContent = busy ? "AI 分析中..." : "AI 分析并推荐";
+    if (busy) els.aiAnalyzeBtn.setAttribute("aria-busy", "true");
+    else els.aiAnalyzeBtn.removeAttribute("aria-busy");
+  }
+
+  function currentAiClientRequestId() {
+    const existing = sessionStorage.getItem(AI_REQUEST_STORAGE_KEY) || "";
+    if (existing) return existing;
+    const value = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : Array.from(crypto.getRandomValues(new Uint32Array(4)), (item) => item.toString(16).padStart(8, "0")).join("");
+    sessionStorage.setItem(AI_REQUEST_STORAGE_KEY, value);
+    return value;
+  }
+
+  function clearAiTaskStorage() {
+    sessionStorage.removeItem(AI_TASK_STORAGE_KEY);
+    sessionStorage.removeItem(AI_REQUEST_STORAGE_KEY);
+  }
+
+  async function waitForAiTask(initialTask, token) {
+    let task = initialTask || {};
+    const taskId = String(task.task_id || "");
+    if (!/^[-_A-Za-z0-9]{20,64}$/.test(taskId)) {
+      throw new Error("AI 任务返回格式错误");
+    }
+    sessionStorage.setItem(AI_TASK_STORAGE_KEY, taskId);
+    const statusUrl = `/api/ai/tasks/${encodeURIComponent(taskId)}`;
+    const pollAfterMs = Math.max(1000, Math.min(10000, Number(task.poll_after_ms) || 3000));
+    const deadline = Date.now() + AI_TASK_TIMEOUT_MS;
+    let networkFailures = 0;
+
+    while (Date.now() < deadline) {
+      if (task.status === "succeeded") {
+        clearAiTaskStorage();
+        if (!task.result || typeof task.result !== "object") {
+          throw new Error("AI 任务缺少结果");
+        }
+        return task.result;
+      }
+      if (task.status === "failed") {
+        clearAiTaskStorage();
+        const error = new Error(task.error?.message || "AI 分析失败");
+        error.taskFailed = true;
+        throw error;
+      }
+      if (task.status !== "running") {
+        throw new Error("AI 任务状态异常");
+      }
+
+      els.aiStatus.textContent = "AI 两阶段分析正在后台运行";
+      await new Promise((resolve) => window.setTimeout(resolve, pollAfterMs));
+      try {
+        task = await apiFetch(statusUrl, { token });
+        networkFailures = 0;
+      } catch (error) {
+        if (error.status === 401 || error.status === 404) throw error;
+        networkFailures += 1;
+        if (networkFailures >= 3) {
+          throw new Error("AI 任务查询暂时失败，稍后可继续查询");
+        }
+      }
+    }
+    throw new Error("AI 任务仍在后台运行，稍后可继续查询");
   }
 
   function renderAiRecommendation(data) {
@@ -1443,6 +1523,9 @@
     togglePurchaseMode();
     if (savedToken) {
       loadPurchaseState();
+      if (sessionStorage.getItem(AI_TASK_STORAGE_KEY)) {
+        analyzeWithAi();
+      }
     } else {
       els.purchaseList.innerHTML = emptyPurchaseHtml("输入管理密钥后读取服务器购买记录");
     }
@@ -1633,7 +1716,12 @@
       body: options.body
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `请求失败 ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(data.error || `请求失败 ${response.status}`);
+      error.status = response.status;
+      error.data = data;
+      throw error;
+    }
     return data;
   }
 

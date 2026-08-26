@@ -880,6 +880,34 @@ def build_selection_messages(
     ]
 
 
+def parse_model_json_content(content) -> dict:
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str) or not content.strip():
+        raise AiResponseError("DeepSeek API 未返回有效 JSON 内容")
+
+    text = content.strip()
+    if text.startswith("```"):
+        first_newline = text.find("\n")
+        if first_newline >= 0:
+            text = text[first_newline + 1:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3].rstrip()
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        object_start = text.find("{")
+        if object_start < 0:
+            raise AiResponseError("DeepSeek API 未返回有效 JSON 内容")
+        try:
+            value, _ = json.JSONDecoder().raw_decode(text[object_start:])
+        except json.JSONDecodeError as exc:
+            raise AiResponseError("DeepSeek API 未返回有效 JSON 内容") from exc
+    if not isinstance(value, dict):
+        raise AiResponseError("DeepSeek API 未返回 JSON 对象")
+    return value
+
+
 def call_deepseek(messages: list[dict], *, timeout: int = 60) -> dict:
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not api_key:
@@ -896,7 +924,7 @@ def call_deepseek(messages: list[dict], *, timeout: int = 60) -> dict:
         "response_format": {"type": "json_object"},
         "thinking": {"type": "enabled" if request_stage == "number_selection" else "disabled"},
         "temperature": 0.25,
-        "max_tokens": 2400,
+        "max_tokens": 6000 if request_stage == "number_selection" else 3200,
         "stream": False,
         "user_id": "ssq-research",
     }
@@ -915,10 +943,16 @@ def call_deepseek(messages: list[dict], *, timeout: int = 60) -> dict:
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise AiAnalysisError("DeepSeek API 请求失败或返回格式异常") from exc
     try:
-        content = raw["choices"][0]["message"]["content"]
-        return json.loads(content)
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        choice = raw["choices"][0]
+        content = choice["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
         raise AiResponseError("DeepSeek API 未返回有效 JSON 内容") from exc
+    try:
+        return parse_model_json_content(content)
+    except AiResponseError as exc:
+        if choice.get("finish_reason") == "length":
+            raise AiResponseError("DeepSeek API JSON 输出被截断") from exc
+        raise
 
 
 def _request_stage(

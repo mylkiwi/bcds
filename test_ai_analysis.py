@@ -8,6 +8,7 @@ from ai_analysis import (
     build_messages,
     build_selection_messages,
     generate_ai_recommendation,
+    parse_model_json_content,
     validate_analysis_profile,
     validate_recommendation,
 )
@@ -305,6 +306,22 @@ class AiAnalysisTests(unittest.TestCase):
         result = generate_ai_recommendation(self.rows, requester=requester)
         self.assertEqual(result["recommendation"]["red"], [3, 8, 14, 16, 20, 27, 33])
         self.assertEqual(calls, ["analysis_profile", "analysis_profile", "number_selection"])
+
+    def test_model_json_parser_accepts_fences_and_leading_text(self):
+        expected = {"summary": "ok", "red": [1, 2, 3]}
+        self.assertEqual(
+            parse_model_json_content("```json\n" + json.dumps(expected) + "\n```"),
+            expected,
+        )
+        self.assertEqual(
+            parse_model_json_content("以下是结果：\n" + json.dumps(expected) + "\n已完成"),
+            expected,
+        )
+
+    def test_model_json_parser_rejects_empty_or_non_object_content(self):
+        for content in (None, "", "[]", "not json"):
+            with self.subTest(content=content), self.assertRaises(AiResponseError):
+                parse_model_json_content(content)
 
     def test_boolean_and_decimal_numbers_are_rejected(self):
         frozen = self.freeze()

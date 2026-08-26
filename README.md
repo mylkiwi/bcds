@@ -146,6 +146,7 @@ AI 3.0 评分权重：
 2. 服务端按 30、50 期窗口滚动回测热号、遗漏、冷号、上期重号和蓝球 Top4，并给出随机期望基线。
 3. 第一次 DeepSeek 调用只读取这份结构化 JSON 报告，生成本期动态选号规则、形态依据和历史回测结论，不生成号码；每条口径必须引用服务端提供的统计、走势、形态或回测证据标识，服务端按原始值核对后冻结规则。
 4. 第二次 DeepSeek 调用只能依据已冻结的规则生成推荐号码和逐号定性理由，不能改写规则。服务端固定校验红蓝球数量、范围和不重复，并校验最终号码是否符合第一阶段生成的动态口径，最后附加本地复算的真实统计数字。
+5. 页面先创建后台 AI 任务，再用短请求查询进度和结果；刷新页面可继续查询同一任务，避免长连接被反向代理超时截断。
 
 奇偶、大小、三区、和值和连号都不是预先写死的研究阈值。两阶段调用能固定“先分析、后选号”的接口顺序，但历史统计和回测仍只能解释过去，不能证明下一期更容易开出。
 
@@ -184,8 +185,10 @@ GET    /api/state
 GET    /api/purchases
 GET    /api/check-results
 GET    /api/ai/status
+POST   /api/ai/tasks
+GET    /api/ai/tasks/:task_id
 POST   /api/purchases
-POST   /api/ai/recommendation
+POST   /api/ai/recommendation       # 保留的同步兼容接口
 DELETE /api/purchases/:id
 POST   /api/check-now
 ```

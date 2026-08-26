@@ -6,14 +6,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
@@ -27,9 +29,13 @@ HISTORY_PATH = Path(os.environ.get("SSQ_HISTORY_PATH", PUBLIC_DATA_DIR / "ssq-hi
 PURCHASES_PATH = Path(os.environ.get("SSQ_PURCHASES_PATH", PRIVATE_DATA_DIR / "purchases.json"))
 RESULTS_PATH = Path(os.environ.get("SSQ_RESULTS_PATH", PRIVATE_DATA_DIR / "check-results.json"))
 DISPLAY_TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
-AI_REQUEST_LOCK = threading.Lock()
+AI_REQUEST_LOCK = threading.BoundedSemaphore(1)
 AI_USAGE_LOCK = threading.Lock()
 AI_REQUEST_TIMES: list[float] = []
+AI_JOB_LOCK = threading.Lock()
+AI_JOBS: dict[str, dict] = {}
+AI_JOB_TTL_SECONDS = 3600
+AI_JOB_MAX_TERMINAL = 100
 
 
 def reserve_ai_quota() -> tuple[bool, str]:
@@ -44,6 +50,137 @@ def reserve_ai_quota() -> tuple[bool, str]:
             return False, "AI 今日调用额度已用完"
         AI_REQUEST_TIMES.append(now)
     return True, ""
+
+
+def ai_request_options(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("AI 请求格式错误")
+    return {
+        "scope": payload.get("scope", "all"),
+        "red_count": int(payload.get("red_count", 7)),
+        "blue_count": int(payload.get("blue_count", 2)),
+        "shape_filter": bool(payload.get("shape_filter", True)),
+        "avoid_popular": bool(payload.get("avoid_popular", True)),
+    }
+
+
+def ai_client_request_id(payload: dict) -> str:
+    value = str(payload.get("client_request_id", "")).strip()
+    if value and not re.fullmatch(r"[-_A-Za-z0-9]{16,64}", value):
+        raise ValueError("client_request_id 格式错误")
+    return value
+
+
+def _ai_job_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _cleanup_ai_jobs_locked(now: float) -> None:
+    expired = [
+        job_id
+        for job_id, job in AI_JOBS.items()
+        if job["status"] != "running" and now - job["updated_epoch"] >= AI_JOB_TTL_SECONDS
+    ]
+    for job_id in expired:
+        AI_JOBS.pop(job_id, None)
+    terminal = sorted(
+        (
+            (job["updated_epoch"], job_id)
+            for job_id, job in AI_JOBS.items()
+            if job["status"] != "running"
+        ),
+        reverse=True,
+    )
+    for _, job_id in terminal[AI_JOB_MAX_TERMINAL:]:
+        AI_JOBS.pop(job_id, None)
+
+
+def get_ai_job(job_id: str) -> dict | None:
+    with AI_JOB_LOCK:
+        _cleanup_ai_jobs_locked(time.time())
+        job = AI_JOBS.get(job_id)
+        if not job:
+            return None
+        payload = {
+            "task_id": job_id,
+            "status": job["status"],
+            "created_at": job["created_at"],
+            "updated_at": job["updated_at"],
+        }
+        if job["status"] == "succeeded":
+            payload["result"] = job["result"]
+        elif job["status"] == "failed":
+            payload["error"] = job["error"]
+        return payload
+
+
+def find_ai_job_by_client_request_id(client_request_id: str) -> dict | None:
+    if not client_request_id:
+        return None
+    with AI_JOB_LOCK:
+        _cleanup_ai_jobs_locked(time.time())
+        for job_id, job in AI_JOBS.items():
+            if job.get("client_request_id") == client_request_id:
+                return {"task_id": job_id}
+    return None
+
+
+def _finish_ai_job(job_id: str, *, result: dict | None = None, error: dict | None = None) -> None:
+    now = time.time()
+    with AI_JOB_LOCK:
+        job = AI_JOBS.get(job_id)
+        if not job:
+            return
+        job["status"] = "failed" if error else "succeeded"
+        job["updated_at"] = _ai_job_timestamp()
+        job["updated_epoch"] = now
+        if error:
+            job["error"] = error
+        else:
+            job["result"] = result
+
+
+def _run_ai_job(job_id: str, options: dict, generator) -> None:
+    try:
+        result = generator(read_json(HISTORY_PATH, []), **options)
+        _finish_ai_job(job_id, result=result)
+    except AiAnalysisError as exc:
+        _finish_ai_job(job_id, error={"code": "ai_analysis_failed", "message": str(exc)})
+    except Exception:
+        traceback.print_exc()
+        _finish_ai_job(
+            job_id,
+            error={"code": "internal_error", "message": "AI 分析发生内部错误"},
+        )
+    finally:
+        AI_REQUEST_LOCK.release()
+
+
+def start_ai_job(options: dict, *, client_request_id: str = "", generator=None) -> str:
+    job_id = secrets.token_urlsafe(18)
+    timestamp = _ai_job_timestamp()
+    with AI_JOB_LOCK:
+        _cleanup_ai_jobs_locked(time.time())
+        AI_JOBS[job_id] = {
+            "status": "running",
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "updated_epoch": time.time(),
+            "client_request_id": client_request_id,
+        }
+    worker = threading.Thread(
+        target=_run_ai_job,
+        args=(job_id, options, generator or generate_ai_recommendation),
+        name=f"ssq-ai-{job_id[:8]}",
+        daemon=True,
+    )
+    try:
+        worker.start()
+    except Exception:
+        with AI_JOB_LOCK:
+            AI_JOBS.pop(job_id, None)
+        raise
+    return job_id
 
 
 def read_json(path: Path, default):
@@ -224,6 +361,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     def handle_request(self, method: str) -> None:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
+        query = parse_qs(parsed.query)
         try:
             if method == "GET" and not path.startswith("/api"):
                 self.serve_static(path)
@@ -255,11 +393,17 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "model": os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
                 })
                 return
+            if method == "GET" and path.startswith("/api/ai/tasks/"):
+                self.ai_task_status(unquote(path.removeprefix("/api/ai/tasks/")))
+                return
             if method == "POST" and path == "/api/purchases":
                 self.save_purchase()
                 return
+            if method == "POST" and path == "/api/ai/tasks":
+                self.ai_recommendation(async_mode=True)
+                return
             if method == "POST" and path == "/api/ai/recommendation":
-                self.ai_recommendation()
+                self.ai_recommendation(async_mode=query.get("async", [""])[-1].lower() in {"1", "true"})
                 return
             if method == "POST" and path == "/api/check-now":
                 self.write_response(run_check())
@@ -307,32 +451,56 @@ class ApiHandler(BaseHTTPRequestHandler):
         write_json(PURCHASES_PATH, purchases)
         self.write_response({"item": item, "notification": push_purchase_bark(item)})
 
-    def ai_recommendation(self) -> None:
+    def ai_task_status(self, task_id: str) -> None:
+        if not re.fullmatch(r"[-_A-Za-z0-9]{20,64}", task_id):
+            self.write_response({"error": "AI 任务不存在或已过期"}, status=404)
+            return
+        task = get_ai_job(task_id)
+        if not task:
+            self.write_response({"error": "AI 任务不存在或已过期"}, status=404)
+            return
+        self.write_response(task)
+
+    def write_ai_task_reference(self, task_id: str) -> None:
+        task = get_ai_job(task_id) or {"task_id": task_id, "status": "running"}
+        task.update({
+            "status_url": f"/api/ai/tasks/{task_id}",
+            "poll_after_ms": 3000,
+        })
+        self.write_response(task, status=202)
+
+    def ai_recommendation(self, *, async_mode: bool = False) -> None:
         if not os.environ.get("DEEPSEEK_API_KEY", "").strip():
             self.write_response({"error": "服务端未配置 DeepSeek API"}, status=503)
+            return
+        payload = self.read_body()
+        options = ai_request_options(payload)
+        client_request_id = ai_client_request_id(payload) if async_mode else ""
+        existing = find_ai_job_by_client_request_id(client_request_id)
+        if existing:
+            self.write_ai_task_reference(existing["task_id"])
             return
         if not AI_REQUEST_LOCK.acquire(blocking=False):
             self.write_response({"error": "已有 AI 分析正在进行，请稍后再试"}, status=429)
             return
+        worker_owns_slot = False
         try:
             allowed, message = reserve_ai_quota()
             if not allowed:
                 self.write_response({"error": message}, status=429)
                 return
-            payload = self.read_body()
-            result = generate_ai_recommendation(
-                read_json(HISTORY_PATH, []),
-                scope=payload.get("scope", "all"),
-                red_count=int(payload.get("red_count", 7)),
-                blue_count=int(payload.get("blue_count", 2)),
-                shape_filter=bool(payload.get("shape_filter", True)),
-                avoid_popular=bool(payload.get("avoid_popular", True)),
-            )
+            if async_mode:
+                task_id = start_ai_job(options, client_request_id=client_request_id)
+                worker_owns_slot = True
+                self.write_ai_task_reference(task_id)
+                return
+            result = generate_ai_recommendation(read_json(HISTORY_PATH, []), **options)
             self.write_response(result)
         except AiAnalysisError as exc:
             self.write_response({"error": str(exc)}, status=502)
         finally:
-            AI_REQUEST_LOCK.release()
+            if not worker_owns_slot:
+                AI_REQUEST_LOCK.release()
 
     def delete_purchase(self, purchase_id: str) -> None:
         purchases = read_json(PURCHASES_PATH, [])
