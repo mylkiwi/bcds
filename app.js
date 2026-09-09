@@ -74,6 +74,13 @@
     drawList: document.getElementById("drawList"),
     latestInfo: document.getElementById("latestInfo"),
     adminToken: document.getElementById("adminToken"),
+    remoteAuth: document.getElementById("remoteAuth"),
+    connectBtn: document.getElementById("connectBtn"),
+    connectionStatus: document.getElementById("connectionStatus"),
+    aiKeyStatus: document.getElementById("aiKeyStatus"),
+    purchaseKeyStatus: document.getElementById("purchaseKeyStatus"),
+    defaultsSummary: document.getElementById("defaultsSummary"),
+    purchasePreview: document.getElementById("purchasePreview"),
     purchaseIssue: document.getElementById("purchaseIssue"),
     purchaseMode: document.getElementById("purchaseMode"),
     purchaseRed: document.getElementById("purchaseRed"),
@@ -95,6 +102,8 @@
   let currentSchemeText = "";
   let currentScheme = null;
   let currentAiResult = null;
+  let localAutoAccess = false;
+  let purchaseUsesCurrentScheme = true;
 
   init();
 
@@ -106,7 +115,7 @@
     }
 
     const latest = history[history.length - 1];
-    els.dataStatus.textContent = `${history.length} 期数据，最新 ${latest.issue}`;
+    els.dataStatus.textContent = `${history.length} 期数据 · 截至 ${latest.date}（${latest.issue} 期）`;
     els.latestInfo.textContent = `${latest.issue} / ${latest.date}`;
 
     bindEvents();
@@ -136,10 +145,21 @@
     els.refreshPurchasesBtn.addEventListener("click", loadPurchaseState);
     els.checkNowBtn.addEventListener("click", checkNow);
     els.aiAnalyzeBtn.addEventListener("click", analyzeWithAi);
-    els.adminToken.addEventListener("change", () => {
-      localStorage.setItem("ssqAdminToken", els.adminToken.value.trim());
-      loadPurchaseState();
-      loadAiHistory({ restoreLatest: true });
+    els.adminToken.addEventListener("input", () => {
+      els.adminToken.removeAttribute("aria-invalid");
+    });
+    els.connectBtn.addEventListener("click", initializeAccess);
+    els.adminToken.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") initializeAccess();
+    });
+    [els.purchaseIssue, els.purchaseMode, els.purchaseRed, els.purchaseBlue,
+      els.purchaseDan, els.purchaseTuo, els.purchaseDtBlue, els.purchaseNote].forEach((el) => {
+      const markEdited = () => {
+        purchaseUsesCurrentScheme = false;
+        els.purchasePreview.textContent = "已手动调整记录，请展开核对后保存。";
+      };
+      el.addEventListener("input", markEdited);
+      el.addEventListener("change", markEdited);
     });
   }
 
@@ -1120,6 +1140,9 @@
 
     currentSchemeText = text;
     els.recommendation.innerHTML = `${redHtml}${blueHtml}<p class="scheme-text">${escapeHtml(text)}</p>`;
+    const scopeName = els.scopeSelect.value === "all" ? "全部历史" : `近 ${els.scopeSelect.value} 期`;
+    els.defaultsSummary.textContent = `${scopeName} · ${els.strategySelect.selectedOptions[0].textContent} · ${typeName} ${scheme.red.length} 红 + ${scheme.blue.length} 蓝`;
+    if (purchaseUsesCurrentScheme) fillCurrentPurchase();
   }
 
   function renderMetrics(scheme) {
@@ -1288,7 +1311,7 @@
     els.aiRecommendation.innerHTML = '<div class="ai-loading">正在分析历史统计、最近走势与滚动回测...</div>';
 
     try {
-      const token = requireAdminToken();
+      const token = accessToken();
       const activeTaskId = sessionStorage.getItem(AI_TASK_STORAGE_KEY) || "";
       let task;
       if (activeTaskId) {
@@ -1472,7 +1495,7 @@
 
   async function loadAiHistory({ restoreLatest = false } = {}) {
     try {
-      const token = requireAdminToken();
+      const token = accessToken();
       const response = await apiFetch("/api/ai/recommendations?limit=12", { token });
       const items = response.items || [];
       renderAiHistory(items);
@@ -1519,7 +1542,7 @@
 
   async function loadAiReport(reportId) {
     try {
-      const token = requireAdminToken();
+      const token = accessToken();
       const response = await apiFetch(`/api/ai/recommendations/${encodeURIComponent(reportId)}`, { token });
       if (!response.item?.result) throw new Error("AI 分析记录内容缺失");
       applyAiResult(response.item.result, { restoreControls: true });
@@ -1530,7 +1553,7 @@
 
   async function deleteAiReport(reportId) {
     try {
-      const token = requireAdminToken();
+      const token = accessToken();
       await apiFetch(`/api/ai/recommendations/${encodeURIComponent(reportId)}`, { method: "DELETE", token });
       const deletingCurrent = currentAiResult?.report_id === reportId;
       if (deletingCurrent) {
@@ -1700,20 +1723,56 @@
   }
 
   function initPurchasePanel() {
-    const savedToken = localStorage.getItem("ssqAdminToken") || "";
-    els.adminToken.value = savedToken;
-    els.purchaseIssue.value = nextIssue();
-    togglePurchaseMode();
-    if (savedToken) {
-      loadPurchaseState();
+    fillCurrentPurchase();
+    initializeAccess();
+  }
+
+  async function initializeAccess() {
+    els.connectionStatus.textContent = "正在自动连接服务…";
+    try {
+      let access;
+      try {
+        // Try local access before touching old browser credentials (which may be the AI key).
+        access = await apiFetch("/api/access", { token: "", quietAuth: true });
+      } catch (error) {
+        if (error.status !== 401) throw error;
+        let savedToken = "";
+        try { savedToken = localStorage.getItem("ssqAdminToken") || ""; } catch (_) { /* Storage is optional. */ }
+        const token = els.adminToken.value.trim() || savedToken;
+        if (!token) throw error;
+        access = await apiFetch("/api/access", { token, quietAuth: true });
+        els.adminToken.value = token;
+        try { localStorage.setItem("ssqAdminToken", token); } catch (_) { /* Storage is optional. */ }
+      }
+      localAutoAccess = access.mode === "local";
+      els.remoteAuth.classList.add("hidden");
+      if (localAutoAccess) {
+        els.adminToken.value = "";
+        try { localStorage.removeItem("ssqAdminToken"); } catch (_) { /* No browser key needed. */ }
+      }
+      els.aiKeyStatus.textContent = `AI 密钥：${access.keys.ai ? "已配置（仅服务端使用）" : "服务端未配置"}`;
+      els.purchaseKeyStatus.textContent = `购买接口密钥：${access.keys.purchase ? "已配置（独立管理）" : "服务端未配置"}`;
+      els.connectionStatus.textContent = localAutoAccess
+        ? "本地已自动连接，无需输入密钥"
+        : "已连接远程服务";
+      if (access.configured_key_count === 2 && !access.independent_keys) {
+        els.purchaseKeyStatus.textContent = "购买接口密钥：与 AI 密钥重复，请在服务端分开配置";
+      }
+      await loadPurchaseState();
       if (sessionStorage.getItem(AI_TASK_STORAGE_KEY)) {
         analyzeWithAi();
       } else {
-        loadAiHistory({ restoreLatest: true });
+        // Keep the default parameters on page load; older reports remain available on demand.
+        await loadAiHistory();
       }
-    } else {
-      els.purchaseList.innerHTML = emptyPurchaseHtml("输入管理密钥后读取服务器购买记录");
-      els.aiHistory.innerHTML = emptyPurchaseHtml("输入管理密钥后读取 AI 分析记录");
+    } catch (error) {
+      els.connectionStatus.textContent = error.message;
+      els.aiKeyStatus.textContent = "AI 密钥：服务未连接，暂未核验";
+      els.purchaseKeyStatus.textContent = "购买接口密钥：服务未连接，暂未核验";
+      els.remoteAuth.classList.toggle("hidden", error.status !== 401);
+      els.purchaseList.innerHTML = emptyPurchaseHtml(error.message);
+      els.aiHistory.innerHTML = emptyPurchaseHtml(error.message);
+      setPurchaseStatus(error.message);
     }
   }
 
@@ -1725,6 +1784,7 @@
 
   function fillCurrentPurchase() {
     if (!currentScheme) return;
+    purchaseUsesCurrentScheme = true;
     els.purchaseIssue.value = nextIssue();
     if (currentScheme.type === "dantuo") {
       els.purchaseMode.value = "dantuo";
@@ -1739,11 +1799,12 @@
       els.purchaseBlue.value = formatNums(currentScheme.blue);
     }
     els.purchaseNote.value = currentSchemeText;
+    els.purchasePreview.textContent = `第 ${els.purchaseIssue.value} 期 · ${currentSchemeText} · ${currentScheme.betCount} 注 / ${currentScheme.betCount * 2} 元`;
   }
 
   async function savePurchase() {
     try {
-      const token = requireAdminToken();
+      const token = accessToken();
       const payload = buildPurchasePayload();
       setPurchaseStatus("保存中...");
       const result = await apiFetch("/api/purchases", {
@@ -1763,11 +1824,11 @@
 
   async function loadPurchaseState() {
     try {
-      const token = requireAdminToken();
+      const token = accessToken();
       setPurchaseStatus("读取服务器记录...");
       const state = await apiFetch("/api/state", { token });
       renderPurchases(state.purchases || [], state.results || [], state.latest || null);
-      setPurchaseStatus(state.latest ? `服务器最新开奖 ${state.latest.issue}` : "已读取记录");
+      setPurchaseStatus(state.latest ? `服务器数据截至 ${state.latest.date}（${state.latest.issue} 期）` : "已读取记录");
     } catch (error) {
       els.purchaseList.innerHTML = emptyPurchaseHtml("无法读取服务器购买记录");
       setPurchaseStatus(error.message);
@@ -1776,7 +1837,7 @@
 
   async function checkNow() {
     try {
-      const token = requireAdminToken();
+      const token = accessToken();
       setPurchaseStatus("正在核奖...");
       const result = await apiFetch("/api/check-now", { method: "POST", token });
       if (!result.ok) {
@@ -1791,7 +1852,7 @@
 
   async function deletePurchase(id) {
     try {
-      const token = requireAdminToken();
+      const token = accessToken();
       await apiFetch(`/api/purchases/${encodeURIComponent(id)}`, { method: "DELETE", token });
       setPurchaseStatus("已删除");
       await loadPurchaseState();
@@ -1849,7 +1910,7 @@
           </div>
           <p>${numbers}</p>
           <p>${resultLine}</p>
-          ${purchase.note ? `<p class="purchase-note-text"><span class="blessing-label">祝福</span>${escapeHtml(purchase.note)}</p>` : ""}
+          ${purchase.note ? `<p class="purchase-note-text"><span class="blessing-label">备注</span>${escapeHtml(purchase.note)}</p>` : ""}
           <button type="button" class="link-btn" data-delete-purchase="${escapeHtml(purchase.id)}">删除</button>
         </div>
       `;
@@ -1892,18 +1953,28 @@
   }
 
   async function apiFetch(path, options = {}) {
-    const headers = {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${options.token}`
-    };
-    const response = await fetch(path, {
-      method: options.method || "GET",
-      headers,
-      body: options.body
-    });
+    if (window.location.protocol === "file:") {
+      throw new Error("请打开本地服务 http://127.0.0.1:8000/，不要直接打开 HTML 文件");
+    }
+    const headers = { "Content-Type": "application/json", "X-SSQ-Local": "1" };
+    if (options.token) headers.Authorization = `Bearer ${options.token}`;
+    let response;
+    try {
+      response = await fetch(path, {
+        method: options.method || "GET",
+        headers,
+        body: options.body
+      });
+    } catch (_) {
+      throw new Error("服务连接失败，请确认本地服务已启动后刷新页面");
+    }
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const error = new Error(data.error || `请求失败 ${response.status}`);
+      if (response.status === 401 && !options.quietAuth) els.remoteAuth.classList.remove("hidden");
+      const message = response.status === 401
+        ? "服务尚未授权：本地请使用默认启动方式；远程服务需验证访问密钥"
+        : data.error || `请求失败 ${response.status}`;
+      const error = new Error(message);
       error.status = response.status;
       error.data = data;
       throw error;
@@ -1911,11 +1982,8 @@
     return data;
   }
 
-  function requireAdminToken() {
-    const token = els.adminToken.value.trim();
-    if (!token) throw new Error("请先输入管理密钥");
-    localStorage.setItem("ssqAdminToken", token);
-    return token;
+  function accessToken() {
+    return localAutoAccess ? "" : els.adminToken.value.trim();
   }
 
   function setPurchaseStatus(text) {

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+import ipaddress
 import json
 import os
 import re
@@ -587,6 +588,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.write_response({"error": "unauthorized"}, status=401)
                 return
 
+            if method == "GET" and path == "/api/access":
+                admin_token = os.environ.get("SSQ_ADMIN_TOKEN", "").strip()
+                ai_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+                self.write_response({
+                    "mode": "local" if self.local_authorized() else "token",
+                    "keys": {"ai": bool(ai_key), "purchase": bool(admin_token)},
+                    "configured_key_count": int(bool(ai_key)) + int(bool(admin_token)),
+                    "independent_keys": bool(ai_key and admin_token and ai_key != admin_token),
+                })
+                return
             if method == "GET" and path == "/api/purchases":
                 self.write_response({"items": read_json(PURCHASES_PATH, [])})
                 return
@@ -775,14 +786,47 @@ class ApiHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length).decode("utf-8")
         return json.loads(raw)
 
+    def local_authorized(self) -> bool:
+        # Opt-in only in run_local.py. Never trust proxy headers or a loopback peer alone:
+        # production nginx also connects from loopback.
+        if os.environ.get("SSQ_LOCAL_AUTO_AUTH") != "1":
+            return False
+        if self.headers.get("X-SSQ-Local") != "1":
+            return False
+        try:
+            if not ipaddress.ip_address(self.server.server_address[0]).is_loopback:
+                return False
+            if not ipaddress.ip_address(self.client_address[0]).is_loopback:
+                return False
+        except ValueError:
+            return False
+        if any(name.lower() == "forwarded" or name.lower().startswith("x-forwarded-")
+               for name in self.headers):
+            return False
+        host = self.headers.get("Host", "")
+        port = self.server.server_port
+        allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+        if port == 80:
+            allowed_hosts.update({"127.0.0.1", "localhost", "[::1]"})
+        if host not in allowed_hosts:
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin != f"http://{host}":
+            return False
+        if self.headers.get("Sec-Fetch-Site", "same-origin") != "same-origin":
+            return False
+        return True
+
     def authorized(self) -> bool:
         token = os.environ.get("SSQ_ADMIN_TOKEN", "").strip()
         if not token:
             return False
-        auth = self.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and auth[7:].strip() == token:
+        if self.local_authorized():
             return True
-        return self.headers.get("X-Admin-Token", "").strip() == token
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer ") and secrets.compare_digest(auth[7:].strip(), token):
+            return True
+        return secrets.compare_digest(self.headers.get("X-Admin-Token", "").strip(), token)
 
     def write_response(self, payload, status: int = 200) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -794,9 +838,12 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def send_common_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", self.headers.get("Origin", "*"))
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, X-Admin-Token, Content-Type")
+        # The local marker is not a secret: its protection is same-origin browser policy.
+        # Never allow cross-origin preflight to send it, or expose local private responses.
+        if os.environ.get("SSQ_LOCAL_AUTO_AUTH") != "1":
+            self.send_header("Access-Control-Allow-Origin", self.headers.get("Origin", "*"))
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Authorization, X-Admin-Token, Content-Type")
         self.send_header("Cache-Control", "no-store")
 
     def log_message(self, fmt: str, *args) -> None:

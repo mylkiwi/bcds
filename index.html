@@ -19,6 +19,18 @@
 
     <main class="layout">
       <section class="panel controls" aria-label="策略控制">
+        <div class="default-settings">
+          <strong>默认设置已就绪，无需填写</strong>
+          <span id="defaultsSummary">近 100 期 · 本地综合研究 · 复式 7 红 + 2 蓝</span>
+        </div>
+        <div class="service-status" role="status">
+          <strong id="connectionStatus">正在自动连接本地服务…</strong>
+          <span id="aiKeyStatus">AI 密钥：正在检查</span>
+          <span id="purchaseKeyStatus">购买接口密钥：正在检查</span>
+        </div>
+        <details class="optional-settings">
+          <summary>调整参数（可选）</summary>
+          <div class="optional-settings-body">
         <div class="control-row">
           <label>
             统计范围
@@ -107,6 +119,9 @@
           </label>
         </div>
 
+          </div>
+        </details>
+
         <div class="actions">
           <button id="generateBtn" type="button">本地生成</button>
           <button id="aiAnalyzeBtn" type="button">AI 分析生成</button>
@@ -142,16 +157,25 @@
       <section class="panel purchase-panel wide" aria-label="购买记录">
         <div class="section-head">
           <h2>购买记录</h2>
-          <span id="purchaseStatus">输入管理密钥后可保存和核奖</span>
+          <span id="purchaseStatus">正在自动读取记录…</span>
         </div>
 
         <div class="purchase-shell">
           <div class="purchase-form">
-            <div class="control-grid purchase-token-grid">
+            <div id="remoteAuth" class="remote-auth hidden">
               <label>
-                管理密钥
-                <input id="adminToken" type="password" autocomplete="current-password" placeholder="服务器 SSQ_ADMIN_TOKEN" />
+                远程服务访问密钥（本机自动连接时无需填写）
+                <input id="adminToken" class="secret-input" type="text" autocomplete="off"
+                       autocapitalize="none" spellcheck="false" placeholder="购买 / 管理接口密钥，不是 AI 密钥" />
               </label>
+              <button id="connectBtn" type="button" class="secondary">连接远程服务</button>
+            </div>
+            <p id="purchasePreview" class="purchase-preview">正在自动带入当前推荐…</p>
+            <p class="default-note">号码和备注自动填好，期号按已加载数据推导，请核对数据日期；只保存记录，不会代购或自动下单。</p>
+            <details class="optional-settings">
+              <summary>查看或修改记录（可选）</summary>
+              <div class="optional-settings-body">
+            <div class="control-grid purchase-token-grid">
               <label>
                 期号
                 <input id="purchaseIssue" type="text" inputmode="numeric" placeholder="例如 2026066" />
@@ -192,9 +216,12 @@
             </div>
 
             <label class="purchase-note">
-              祝福
-              <textarea id="purchaseNote" rows="2" placeholder="例如：好运常在，今晚收获惊喜"></textarea>
+              备注（默认记录当前方案）
+              <textarea id="purchaseNote" rows="2" placeholder="默认记录当前方案，也可填写自己的备注"></textarea>
             </label>
+
+              </div>
+            </details>
 
             <div class="actions purchase-actions">
               <button id="fillCurrentBtn" type="button" class="secondary">填入当前推荐</button>

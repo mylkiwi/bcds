@@ -146,6 +146,19 @@ textarea {
   font: inherit;
 }
 
+.secret-input {
+  -webkit-text-security: disc;
+}
+
+.secret-input:focus {
+  -webkit-text-security: none;
+}
+
+.secret-input[aria-invalid="true"] {
+  border-color: var(--red);
+  box-shadow: 0 0 0 3px rgba(215, 59, 62, 0.14);
+}
+
 textarea {
   resize: vertical;
   line-height: 1.5;
@@ -1386,4 +1399,50 @@ th {
   .trend-local-scroll {
     max-height: 540px;
   }
+}
+
+/* Ready-to-use local defaults; optional inputs stay out of the primary flow. */
+.default-settings,
+.service-status {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-bottom: 12px;
+  background: #f8fafc;
+}
+
+.default-settings span,
+.service-status span,
+.default-note {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.optional-settings > summary {
+  padding: 10px 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.optional-settings-body {
+  padding: 8px 0 12px;
+}
+
+.purchase-preview,
+.default-note {
+  margin: 0;
+}
+
+.purchase-preview {
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.remote-auth:not(.hidden) {
+  display: grid;
+  gap: 10px;
 }

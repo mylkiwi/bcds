@@ -1202,24 +1202,35 @@ def call_deepseek(messages: list[dict], *, timeout: int = 60) -> dict:
         "response_format": {"type": "json_object"},
         "thinking": {"type": "enabled" if request_stage == "number_selection" else "disabled"},
         "temperature": 0.25,
-        "max_tokens": 6000 if request_stage == "number_selection" else 4000,
+        # Thinking and the structured answer share the output allowance. 6000 repeatedly
+        # exhausted it before selection JSON was complete. Keep enough answer headroom.
+        "max_tokens": 16000 if request_stage == "number_selection" else 4000,
         "stream": False,
         "user_id": "ssq-research",
     }
+    if request_stage == "number_selection":
+        payload["reasoning_effort"] = "low"
     request = Request(
         f"{base_url}/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
-    request_timeout = max(timeout, 90) if request_stage == "number_selection" else timeout
+    request_timeout = max(timeout, 180) if request_stage == "number_selection" else max(timeout, 90)
     try:
         with urlopen(request, timeout=request_timeout) as response:
             raw = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
+        exc.close()
         raise AiAnalysisError(f"DeepSeek API 返回 HTTP {exc.code}") from exc
-    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise AiAnalysisError("DeepSeek API 请求失败或返回格式异常") from exc
+    except TimeoutError as exc:
+        raise AiAnalysisError("AI 服务响应超时，请稍后重试，无需重新输入密钥") from exc
+    except URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise AiAnalysisError("AI 服务响应超时，请稍后重试，无需重新输入密钥") from exc
+        raise AiAnalysisError("无法连接 AI 服务，请检查服务端网络后重试") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AiAnalysisError("AI 服务返回内容不是有效 JSON，请稍后重试") from exc
     try:
         choice = raw["choices"][0]
         content = choice["message"]["content"]
