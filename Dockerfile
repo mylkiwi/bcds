@@ -23,6 +23,8 @@ WORKDIR /app
 
 # 静态页面烤进镜像
 COPY index.html styles.css app.js /usr/share/nginx/html/
+COPY update_asset_versions.py /app/update_asset_versions.py
+RUN python /app/update_asset_versions.py /usr/share/nginx/html
 COPY data/ssq-history.js data/ssq-history.json /usr/share/nginx/html/data/
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 

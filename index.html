@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>双色球策略选号工具</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=da3ce3359b11" />
   </head>
   <body>
     <header class="topbar">
@@ -24,7 +24,7 @@
           <span id="defaultsSummary">近 100 期 · 本地综合研究 · 复式 7 红 + 2 蓝</span>
         </div>
         <div class="service-status" role="status">
-          <strong id="connectionStatus">正在自动连接本地服务…</strong>
+          <strong id="connectionStatus">正在连接服务，AI 无需授权…</strong>
           <span id="aiKeyStatus">AI 密钥：正在检查</span>
           <span id="purchaseKeyStatus">购买接口密钥：正在检查</span>
         </div>
@@ -164,12 +164,14 @@
           <div class="purchase-form">
             <div id="remoteAuth" class="remote-auth hidden">
               <label>
-                远程服务访问密钥（本机自动连接时无需填写）
-                <input id="adminToken" class="secret-input" type="text" autocomplete="off"
-                       autocapitalize="none" spellcheck="false" placeholder="购买 / 管理接口密钥，不是 AI 密钥" />
+                购买记录解锁（AI 分析无需授权）
+                <input id="adminToken" class="secret-input" type="password" autocomplete="off"
+                       autocapitalize="none" spellcheck="false" placeholder="只填写购买密钥，不是 AI 密钥" />
               </label>
-              <button id="connectBtn" type="button" class="secondary">连接远程服务</button>
+              <button id="connectBtn" type="button" class="secondary">解锁购买记录</button>
+              <p class="default-note">仅首次解锁需填写，本浏览器记住 30 天；其他浏览器需分别解锁。</p>
             </div>
+            <button id="lockPurchasesBtn" type="button" class="secondary hidden">锁定购买记录 / 退出授权</button>
             <p id="purchasePreview" class="purchase-preview">正在自动带入当前推荐…</p>
             <p class="default-note">号码和备注自动填好，期号按已加载数据推导，请核对数据日期；只保存记录，不会代购或自动下单。</p>
             <details class="optional-settings">
@@ -225,9 +227,9 @@
 
             <div class="actions purchase-actions">
               <button id="fillCurrentBtn" type="button" class="secondary">填入当前推荐</button>
-              <button id="savePurchaseBtn" type="button">保存购买记录</button>
-              <button id="refreshPurchasesBtn" type="button" class="secondary">刷新记录</button>
-              <button id="checkNowBtn" type="button" class="secondary">立即核奖</button>
+              <button id="savePurchaseBtn" type="button" disabled>保存购买记录</button>
+              <button id="refreshPurchasesBtn" type="button" disabled class="secondary">刷新记录</button>
+              <button id="checkNowBtn" type="button" disabled class="secondary">立即核奖</button>
             </div>
           </div>
 
@@ -289,13 +291,13 @@
       dataScript.src = "data/ssq-history.js?v=" + Date.now();
       dataScript.onload = () => {
         const appScript = document.createElement("script");
-        appScript.src = "app.js";
+        appScript.src = "app.js?v=7e4a3d41a424";
         document.body.appendChild(appScript);
       };
       dataScript.onerror = () => {
         window.SSQ_HISTORY = [];
         const appScript = document.createElement("script");
-        appScript.src = "app.js";
+        appScript.src = "app.js?v=7e4a3d41a424";
         document.body.appendChild(appScript);
       };
       document.body.appendChild(dataScript);

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+import hashlib
 import ipaddress
 import json
 import os
@@ -16,6 +17,7 @@ import threading
 import time
 import traceback
 from datetime import datetime, timezone
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -41,6 +43,47 @@ AI_DATABASE_LOCK = threading.Lock()
 AI_JOBS: dict[str, dict] = {}
 AI_JOB_TTL_SECONDS = 3600
 AI_JOB_MAX_TERMINAL = 100
+PURCHASE_SESSION_COOKIE = "__Host-ssq_purchase"
+PURCHASE_SESSION_TTL = 30 * 86400
+LOGIN_ATTEMPT_LOCK = threading.Lock()
+LOGIN_FAILURE_TIMES: list[float] = []
+LOGIN_MAX_FAILURES = 10
+LOGIN_WINDOW_SECONDS = 300
+
+
+def _secret_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def create_purchase_session(admin_token: str, previous: str = "") -> str:
+    value = secrets.token_urlsafe(32)
+    now = time.time()
+    with AI_DATABASE_LOCK, closing(_open_ai_database()) as db, db:
+        db.execute("DELETE FROM purchase_sessions WHERE expires_at <= ? OR admin_hash != ? OR session_hash = ?",
+                   (now, _secret_hash(admin_token), _secret_hash(previous)))
+        # Bound the session table; this is a single-owner application.
+        db.execute("DELETE FROM purchase_sessions WHERE session_hash IN "
+                   "(SELECT session_hash FROM purchase_sessions ORDER BY expires_at DESC LIMIT -1 OFFSET 255)")
+        db.execute("INSERT INTO purchase_sessions VALUES (?, ?, ?)",
+                   (_secret_hash(value), _secret_hash(admin_token), now + PURCHASE_SESSION_TTL))
+    return value
+
+
+def valid_purchase_session(value: str, admin_token: str) -> bool:
+    if not value or not admin_token:
+        return False
+    with AI_DATABASE_LOCK, closing(_open_ai_database()) as db:
+        row = db.execute("SELECT admin_hash, expires_at FROM purchase_sessions WHERE session_hash = ?",
+                         (_secret_hash(value),)).fetchone()
+    return bool(row and row["expires_at"] > time.time()
+                and secrets.compare_digest(row["admin_hash"], _secret_hash(admin_token)))
+
+
+def revoke_purchase_session(value: str) -> None:
+    if value:
+        with AI_DATABASE_LOCK, closing(_open_ai_database()) as db, db:
+            db.execute("DELETE FROM purchase_sessions WHERE session_hash = ?", (_secret_hash(value),))
+
 
 
 def reserve_ai_quota() -> tuple[bool, str]:
@@ -282,6 +325,10 @@ def _open_ai_database() -> sqlite3.Connection:
     )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_ai_recommendations_created_at ON ai_recommendations(created_at DESC)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS purchase_sessions ("
+        "session_hash TEXT PRIMARY KEY, admin_hash TEXT NOT NULL, expires_at REAL NOT NULL)"
     )
     return connection
 
@@ -580,23 +627,39 @@ class ApiHandler(BaseHTTPRequestHandler):
             if method == "GET" and not path.startswith("/api"):
                 self.serve_static(path)
                 return
-            if path == "/api/health":
+            if method == "GET" and path == "/api/health":
                 self.write_response({"ok": True, "latest": latest_draw()})
                 return
 
-            if not self.authorized():
-                self.write_response({"error": "unauthorized"}, status=401)
+            # Public AI generation does not imply public purchase data or destructive operations.
+            if method in {"POST", "DELETE"} and not self.same_origin_request():
+                self.write_response({"error": "不允许跨站操作，请在本站页面重试"}, status=403)
+                return
+            if method == "POST" and self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                self.write_response({"error": "请求必须使用 application/json"}, status=415)
+                return
+            if method == "GET" and path == "/api/session":
+                self.write_response(self.access_info(include_session=True))
+                return
+            if method == "POST" and path == "/api/session":
+                self.unlock_purchase()
+                return
+            if method == "DELETE" and path == "/api/session":
+                revoke_purchase_session(self.session_value())
+                self.write_response({"ok": True}, cookie=self.session_cookie("", max_age=0))
+                return
+
+            public_ai = (
+                method == "GET" and (path in {"/api/ai/status", "/api/ai/recommendations"}
+                    or path.startswith("/api/ai/recommendations/") or path.startswith("/api/ai/tasks/"))
+                or method == "POST" and path in {"/api/ai/tasks", "/api/ai/recommendation"}
+            )
+            if not public_ai and not self.authorized():
+                self.write_response({"error": "请先解锁购买记录；AI 分析无需授权"}, status=401)
                 return
 
             if method == "GET" and path == "/api/access":
-                admin_token = os.environ.get("SSQ_ADMIN_TOKEN", "").strip()
-                ai_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-                self.write_response({
-                    "mode": "local" if self.local_authorized() else "token",
-                    "keys": {"ai": bool(ai_key), "purchase": bool(admin_token)},
-                    "configured_key_count": int(bool(ai_key)) + int(bool(admin_token)),
-                    "independent_keys": bool(ai_key and admin_token and ai_key != admin_token),
-                })
+                self.write_response(self.access_info())
                 return
             if method == "GET" and path == "/api/purchases":
                 self.write_response({"items": read_json(PURCHASES_PATH, [])})
@@ -817,34 +880,97 @@ class ApiHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def same_origin_request(self) -> bool:
+        # Ignore proxy-supplied scheme/IP for authorization. Same-site subdomains are not trusted.
+        if self.headers.get("Sec-Fetch-Site", "same-origin") != "same-origin":
+            return False
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        return origin is None or bool(host and origin in {f"https://{host}", f"http://{host}"})
+
+    def session_value(self) -> str:
+        try:
+            cookies = SimpleCookie(self.headers.get("Cookie", ""))
+            value = cookies[PURCHASE_SESSION_COOKIE].value if PURCHASE_SESSION_COOKIE in cookies else ""
+            return value if re.fullmatch(r"[-_A-Za-z0-9]{43}", value) else ""
+        except CookieError:
+            return ""
+
     def authorized(self) -> bool:
         token = os.environ.get("SSQ_ADMIN_TOKEN", "").strip()
-        if not token:
+        if not token or not self.same_origin_request():
             return False
         if self.local_authorized():
             return True
         auth = self.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and secrets.compare_digest(auth[7:].strip(), token):
+        supplied = auth[7:].strip() if auth.startswith("Bearer ") else self.headers.get("X-Admin-Token", "").strip()
+        if supplied and secrets.compare_digest(supplied.encode(), token.encode()):
             return True
-        return secrets.compare_digest(self.headers.get("X-Admin-Token", "").strip(), token)
+        return valid_purchase_session(self.session_value(), token)
 
-    def write_response(self, payload, status: int = 200) -> None:
+    def access_info(self, *, include_session: bool = False) -> dict:
+        admin_token = os.environ.get("SSQ_ADMIN_TOKEN", "").strip()
+        ai_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+        info = {
+            "mode": "local" if self.local_authorized() else "token",
+            "keys": {"ai": bool(ai_key), "purchase": bool(admin_token)},
+            "configured_key_count": int(bool(ai_key)) + int(bool(admin_token)),
+            "independent_keys": bool(ai_key and admin_token and ai_key != admin_token),
+        }
+        if include_session:
+            info["purchase_authorized"] = self.authorized()
+            if not info["purchase_authorized"]:
+                info["mode"] = "locked"
+            elif info["mode"] != "local" and valid_purchase_session(self.session_value(), admin_token):
+                info["mode"] = "session"
+        return info
+
+    def session_cookie(self, value: str, *, max_age: int = PURCHASE_SESSION_TTL) -> str:
+        # Production TLS terminates outside this container. Never downgrade Secure from X-Forwarded-Proto.
+        # Local HTTP uses the existing narrowly validated automatic access, not this cookie.
+        return f"{PURCHASE_SESSION_COOKIE}={value}; Path=/; Max-Age={max_age}; HttpOnly; Secure; SameSite=Strict"
+
+    def unlock_purchase(self) -> None:
+        token = os.environ.get("SSQ_ADMIN_TOKEN", "").strip()
+        if not token:
+            self.write_response({"error": "服务端尚未配置购买密钥，AI 功能不受影响"}, status=503)
+            return
+        if self.headers.get("Origin", "https:").startswith("http:") and not self.local_authorized():
+            self.write_response({"error": "请使用 HTTPS 网站解锁购买记录"}, status=400)
+            return
+        payload = self.read_body()
+        if not isinstance(payload, dict) or not isinstance(payload.get("token"), str) or len(payload["token"]) > 4096:
+            raise ValueError("请输入购买密钥，不是 AI 密钥")
+        with LOGIN_ATTEMPT_LOCK:
+            now = time.time()
+            LOGIN_FAILURE_TIMES[:] = [t for t in LOGIN_FAILURE_TIMES if t > now - LOGIN_WINDOW_SECONDS]
+            if len(LOGIN_FAILURE_TIMES) >= LOGIN_MAX_FAILURES:
+                self.write_response({"error": "解锁尝试过多，请 5 分钟后重试"}, status=429)
+                return
+            if not secrets.compare_digest(payload["token"].strip().encode(), token.encode()):
+                LOGIN_FAILURE_TIMES.append(now)
+                self.write_response({"error": "购买密钥不正确，请勿填写 AI 密钥"}, status=401)
+                return
+        value = create_purchase_session(token, self.session_value())
+        info = self.access_info(include_session=True)
+        info.update(purchase_authorized=True, mode="session")
+        self.write_response(info, cookie=self.session_cookie(value))
+
+    def write_response(self, payload, status: int = 200, *, cookie: str | None = None) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_common_headers()
+        if cookie is not None:
+            self.send_header("Set-Cookie", cookie)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
     def send_common_headers(self) -> None:
-        # The local marker is not a secret: its protection is same-origin browser policy.
-        # Never allow cross-origin preflight to send it, or expose local private responses.
-        if os.environ.get("SSQ_LOCAL_AUTO_AUTH") != "1":
-            self.send_header("Access-Control-Allow-Origin", self.headers.get("Origin", "*"))
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Authorization, X-Admin-Token, Content-Type")
+        # Same-origin UI only: never reflect an arbitrary Origin or enable credentialed CORS.
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"{self.address_string()} - {fmt % args}", flush=True)

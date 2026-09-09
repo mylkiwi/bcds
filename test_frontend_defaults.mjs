@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { webcrypto } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 import test from "node:test";
 import vm from "node:vm";
 
@@ -66,6 +66,7 @@ function setup({ access = "local", oldToken = "", historyItems = [], fetcher } =
   const localStorage = storage(oldToken ? { ssqAdminToken: oldToken } : {});
   const sessionStorage = storage();
   const requests = [];
+  let unlocked = access === "local";
   const context = vm.createContext({
     document: { getElementById: (id) => elements[id] },
     window: { SSQ_HISTORY: rows, location: { protocol: "http:" }, setTimeout },
@@ -75,10 +76,14 @@ function setup({ access = "local", oldToken = "", historyItems = [], fetcher } =
       let status = 200;
       let data = {};
       if (fetcher) ({ status = 200, data = {} } = await fetcher(path, options));
-      else if (path === "/api/access") {
-        if (access === "token" && options.headers.Authorization !== "Bearer test-admin") {
-          status = 401;
-        } else data = { mode: access, keys: { ai: true, purchase: true }, configured_key_count: 2, independent_keys: true };
+      else if (path === "/api/session") {
+        if (options.method === "POST") {
+          unlocked = JSON.parse(options.body).token === "test-admin";
+          if (!unlocked) status = 401;
+        }
+        if (options.method === "DELETE") unlocked = false;
+        data = { mode: unlocked ? (access === "local" ? "local" : "session") : "locked",
+          purchase_authorized: unlocked, keys: { ai: true, purchase: true }, configured_key_count: 2, independent_keys: true };
       } else if (path.startsWith("/api/ai/recommendations")) data = { items: historyItems };
       else if (path === "/api/ai/tasks") data = {
         task_id: "test-default-task-id-0001", status: "failed", error: { message: "simulated provider failure" }
@@ -90,7 +95,7 @@ function setup({ access = "local", oldToken = "", historyItems = [], fetcher } =
   assert.equal(source.split(bootstrap).length, 2, "one application bootstrap must exist");
   vm.runInContext(source.replace(bootstrap, `  globalThis.testApi = {
     bindEvents, generate, renderRecommendation, initializeAccess, fillCurrentPurchase,
-    buildPurchasePayload, aiRequestConfig, analyzeWithAi, accessToken, apiFetch
+    buildPurchasePayload, aiRequestConfig, analyzeWithAi, accessToken, apiFetch, loadPurchaseState, lockPurchases
   };`), context);
   context.testApi.bindEvents();
   return { api: context.testApi, elements, requests, localStorage, sessionStorage, context };
@@ -166,10 +171,10 @@ test("local auto-connection sends no secret, clears old browser keys, and reads 
   assert.equal(api.accessToken(), "");
   assert.equal(localStorage.getItem("ssqAdminToken"), null);
   assert.equal(elements.remoteAuth.classList.contains("hidden"), true);
-  assert.match(elements.connectionStatus.textContent, /本地已自动连接/);
+  assert.match(elements.connectionStatus.textContent, /本地购买记录已自动解锁/);
   assert.match(elements.aiKeyStatus.textContent, /已配置/);
   assert.match(elements.purchaseKeyStatus.textContent, /已配置/);
-  assert.deepEqual(requests.map(({ path }) => path), ["/api/access", "/api/state", "/api/ai/recommendations?limit=12"]);
+  assert.deepEqual(requests.map(({ path }) => path), ["/api/ai/recommendations?limit=12", "/api/session", "/api/state"]);
   assert.ok(requests.every(({ headers }) => !headers.Authorization && headers["X-SSQ-Local"] === "1"));
   assert.equal(elements.modeSelect.value, "complex");
 });
@@ -190,17 +195,90 @@ test("AI button submits the default configuration without any entered credential
   assert.equal(sessionStorage.getItem("ssqAiTaskId"), null);
 });
 
-test("remote service stays protected and may reuse a saved management credential", async () => {
-  const unsigned = setup({ access: "token" });
+test("remote AI works while purchases are locked, and old credentials migrate only once", async () => {
+  const unsigned = setup({ access: "token", historyItems: [{ id: "public-report" }] });
   await unsigned.api.initializeAccess();
   assert.equal(unsigned.elements.remoteAuth.classList.contains("hidden"), false);
-  assert.equal(unsigned.requests.length, 1);
+  assert.equal(unsigned.elements.savePurchaseBtn.disabled, true);
+  assert.match(unsigned.elements.aiHistory.innerHTML, /public-report/);
+  assert.doesNotMatch(unsigned.elements.aiHistory.innerHTML, /data-delete-ai-report/);
+  assert.ok(!unsigned.requests.some(({ path }) => path === "/api/state"));
+  await unsigned.elements.aiAnalyzeBtn.dispatch("click");
+  assert.ok(unsigned.requests.some(({ path }) => path === "/api/ai/tasks"));
+  assert.match(unsigned.elements.aiRecommendation.innerHTML, /simulated provider failure/);
   const saved = setup({ access: "token", oldToken: "test-admin" });
   await saved.api.initializeAccess();
-  assert.equal(saved.api.accessToken(), "test-admin");
-  assert.equal(saved.requests[0].headers.Authorization, undefined);
-  assert.equal(saved.requests[1].headers.Authorization, "Bearer test-admin");
-  assert.match(saved.elements.connectionStatus.textContent, /已连接远程服务/);
+  assert.equal(saved.api.accessToken(), "");
+  assert.equal(saved.localStorage.getItem("ssqAdminToken"), null);
+  assert.equal(saved.elements.adminToken.value, "");
+  const login = saved.requests.find(({ path, method }) => path === "/api/session" && method === "POST");
+  assert.deepEqual(JSON.parse(login.body), { token: "test-admin" });
+  assert.ok(saved.requests.every(({ headers }) => !headers.Authorization));
+  assert.match(saved.elements.connectionStatus.textContent, /购买记录已解锁/);
+  assert.ok(saved.requests.filter(({ path }) => path.startsWith("/api/ai/")).every(({ credentials }) => credentials === "omit"));
+});
+
+test("purchase unlock, logout and wrong keys never interrupt AI", async () => {
+  const { api, elements, requests } = setup({ access: "token", historyItems: [{ id: "report" }] });
+  await api.initializeAccess();
+  elements.adminToken.value = "wrong";
+  await elements.connectBtn.dispatch("click");
+  assert.equal(elements.savePurchaseBtn.disabled, true);
+  assert.match(elements.aiHistory.innerHTML, /report/);
+  elements.adminToken.value = "test-admin";
+  await elements.connectBtn.dispatch("click");
+  assert.equal(elements.adminToken.value, "");
+  assert.equal(elements.savePurchaseBtn.disabled, false);
+  assert.match(elements.aiHistory.innerHTML, /data-delete-ai-report/);
+  await elements.lockPurchasesBtn.dispatch("click");
+  assert.equal(elements.savePurchaseBtn.disabled, true);
+  assert.equal(elements.remoteAuth.classList.contains("hidden"), false);
+  assert.doesNotMatch(elements.aiHistory.innerHTML, /data-delete-ai-report/);
+  await elements.aiAnalyzeBtn.dispatch("click");
+  assert.ok(requests.some(({ path }) => path === "/api/ai/tasks"));
+});
+
+test("purchase status failure and expired authorization leave AI usable", async () => {
+  const statusFailure = setup({ fetcher: async (path) => path === "/api/session"
+    ? { status: 503 } : { data: { items: [{ id: "available-report" }] } } });
+  await statusFailure.api.initializeAccess();
+  assert.match(statusFailure.elements.aiHistory.innerHTML, /available-report/);
+  const expired = setup({ fetcher: async (path) => {
+    if (path === "/api/session") return { data: { purchase_authorized: true, mode: "session", keys: {} } };
+    if (path === "/api/state") return { status: 401 };
+    return { data: { items: [{ id: "available-report" }] } };
+  }});
+  await expired.api.initializeAccess();
+  assert.equal(expired.elements.savePurchaseBtn.disabled, true);
+  assert.match(expired.elements.aiHistory.innerHTML, /available-report/);
+  assert.match(expired.elements.purchaseList.innerHTML, /锁定/);
+});
+
+test("a late purchase read cannot restore private records after logout", async () => {
+  let release;
+  const { api, elements } = setup({ fetcher: async (path, options) => {
+    if (path === "/api/session") return { data: { purchase_authorized: true, mode: "session", keys: {} } };
+    if (path === "/api/state") return new Promise((resolve) => { release = resolve; });
+    return { data: { items: [] } };
+  }});
+  const initializing = api.initializeAccess();
+  await new Promise(setImmediate);
+  await api.lockPurchases();
+  release({ data: { purchases: [{ id: "private-do-not-render" }] } });
+  await initializing;
+  assert.match(elements.purchaseList.innerHTML, /锁定/);
+  assert.doesNotMatch(elements.purchaseList.innerHTML, /private-do-not-render/);
+});
+
+test("passwords stay masked and both JS loader branches use current content versions", () => {
+  const { elements } = setup();
+  assert.equal(elements.adminToken.attributes.get("type"), "password");
+  for (const [asset, count] of [["app.js", 2], ["styles.css", 1]]) {
+    const hash = createHash("sha256").update(readFileSync(new URL(asset, import.meta.url))).digest("hex").slice(0, 12);
+    assert.equal(html.split(`${asset}?v=${hash}`).length - 1, count);
+  }
+  const nginx = readFileSync(new URL("nginx.conf", import.meta.url), "utf8");
+  assert.match(nginx, /Cache-Control "no-cache, must-revalidate" always/);
 });
 
 test("file previews and unavailable servers give actionable messages instead of requesting extra keys", async () => {

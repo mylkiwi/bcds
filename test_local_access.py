@@ -133,7 +133,7 @@ class LocalAccessTests(unittest.TestCase):
             for path, method in [("/api/purchases", "POST"), ("/api/ai/tasks", "POST"),
                                  ("/api/check-now", "POST"), ("/api/purchases/test", "DELETE")]:
                 self.assertEqual(self.request(path, method=method, payload={},
-                                              headers={"Origin": "https://attacker.example"})[0], 401)
+                                              headers={"Origin": "https://attacker.example"})[0], 403)
             for action in [save, ai, delete, check]:
                 action.assert_not_called()
 

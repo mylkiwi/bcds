@@ -76,6 +76,7 @@
     adminToken: document.getElementById("adminToken"),
     remoteAuth: document.getElementById("remoteAuth"),
     connectBtn: document.getElementById("connectBtn"),
+    lockPurchasesBtn: document.getElementById("lockPurchasesBtn"),
     connectionStatus: document.getElementById("connectionStatus"),
     aiKeyStatus: document.getElementById("aiKeyStatus"),
     purchaseKeyStatus: document.getElementById("purchaseKeyStatus"),
@@ -103,6 +104,10 @@
   let currentScheme = null;
   let currentAiResult = null;
   let localAutoAccess = false;
+  let purchaseUnlocked = false;
+  let purchaseAccessRevision = 0;
+  let aiHistoryItems = [];
+  let unlockingPurchases = false;
   let purchaseUsesCurrentScheme = true;
 
   init();
@@ -148,9 +153,10 @@
     els.adminToken.addEventListener("input", () => {
       els.adminToken.removeAttribute("aria-invalid");
     });
-    els.connectBtn.addEventListener("click", initializeAccess);
+    els.connectBtn.addEventListener("click", unlockPurchases);
+    els.lockPurchasesBtn.addEventListener("click", lockPurchases);
     els.adminToken.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") initializeAccess();
+      if (event.key === "Enter") unlockPurchases();
     });
     [els.purchaseIssue, els.purchaseMode, els.purchaseRed, els.purchaseBlue,
       els.purchaseDan, els.purchaseTuo, els.purchaseDtBlue, els.purchaseNote].forEach((el) => {
@@ -1311,17 +1317,15 @@
     els.aiRecommendation.innerHTML = '<div class="ai-loading">正在分析历史统计、最近走势与滚动回测...</div>';
 
     try {
-      const token = accessToken();
       const activeTaskId = sessionStorage.getItem(AI_TASK_STORAGE_KEY) || "";
       let task;
       if (activeTaskId) {
-        task = await apiFetch(`/api/ai/tasks/${encodeURIComponent(activeTaskId)}`, { token });
+        task = await apiFetch(`/api/ai/tasks/${encodeURIComponent(activeTaskId)}`, {});
       } else {
         const config = aiRequestConfig();
         const clientRequestId = currentAiClientRequestId();
         task = await apiFetch("/api/ai/tasks", {
           method: "POST",
-          token,
           body: JSON.stringify({
             ...config,
             client_request_id: clientRequestId
@@ -1329,7 +1333,7 @@
         });
         sessionStorage.setItem(AI_TASK_STORAGE_KEY, task.task_id);
       }
-      const data = await waitForAiTask(task, token);
+      const data = await waitForAiTask(task);
       applyAiResult(data, { restoreControls: true });
       await loadAiHistory();
     } catch (error) {
@@ -1365,7 +1369,7 @@
     sessionStorage.removeItem(AI_REQUEST_STORAGE_KEY);
   }
 
-  async function waitForAiTask(initialTask, token) {
+  async function waitForAiTask(initialTask) {
     let task = initialTask || {};
     const taskId = String(task.task_id || "");
     if (!/^[-_A-Za-z0-9]{20,64}$/.test(taskId)) {
@@ -1398,7 +1402,7 @@
       els.aiStatus.textContent = "AI 两阶段分析正在后台运行";
       await new Promise((resolve) => window.setTimeout(resolve, pollAfterMs));
       try {
-        task = await apiFetch(statusUrl, { token });
+        task = await apiFetch(statusUrl, {});
         networkFailures = 0;
       } catch (error) {
         if (error.status === 401 || error.status === 404) throw error;
@@ -1495,8 +1499,7 @@
 
   async function loadAiHistory({ restoreLatest = false } = {}) {
     try {
-      const token = accessToken();
-      const response = await apiFetch("/api/ai/recommendations?limit=12", { token });
+      const response = await apiFetch("/api/ai/recommendations?limit=12", {});
       const items = response.items || [];
       renderAiHistory(items);
       if (restoreLatest && items.length && !sessionStorage.getItem(AI_TASK_STORAGE_KEY)) {
@@ -1508,6 +1511,7 @@
   }
 
   function renderAiHistory(items) {
+    aiHistoryItems = items;
     if (!items.length) {
       els.aiHistory.innerHTML = '<div class="purchase-empty">还没有持久化的 AI 分析记录</div>';
       return;
@@ -1527,7 +1531,7 @@
           </div>
           <div class="ai-history-actions">
             <button type="button" class="secondary" data-ai-report="${escapeHtml(item.id)}">查看</button>
-            <button type="button" class="link-btn" data-delete-ai-report="${escapeHtml(item.id)}">删除</button>
+            ${purchaseUnlocked ? `<button type="button" class="link-btn" data-delete-ai-report="${escapeHtml(item.id)}">删除</button>` : ""}
           </div>
         </div>
       `;
@@ -1542,8 +1546,7 @@
 
   async function loadAiReport(reportId) {
     try {
-      const token = accessToken();
-      const response = await apiFetch(`/api/ai/recommendations/${encodeURIComponent(reportId)}`, { token });
+      const response = await apiFetch(`/api/ai/recommendations/${encodeURIComponent(reportId)}`, {});
       if (!response.item?.result) throw new Error("AI 分析记录内容缺失");
       applyAiResult(response.item.result, { restoreControls: true });
     } catch (error) {
@@ -1553,8 +1556,7 @@
 
   async function deleteAiReport(reportId) {
     try {
-      const token = accessToken();
-      await apiFetch(`/api/ai/recommendations/${encodeURIComponent(reportId)}`, { method: "DELETE", token });
+      await apiFetch(`/api/ai/recommendations/${encodeURIComponent(reportId)}`, { method: "DELETE" });
       const deletingCurrent = currentAiResult?.report_id === reportId;
       if (deletingCurrent) {
         currentAiResult = null;
@@ -1728,50 +1730,99 @@
   }
 
   async function initializeAccess() {
-    els.connectionStatus.textContent = "正在自动连接服务…";
+    // AI starts independently: an expired purchase session must never block public reports/tasks.
+    const aiReady = sessionStorage.getItem(AI_TASK_STORAGE_KEY) ? analyzeWithAi() : loadAiHistory();
+    els.connectionStatus.textContent = "正在连接服务，AI 无需授权…";
     try {
-      let access;
+      const access = await apiFetch("/api/session", { quietAuth: true });
+      applyAccessStatus(access);
+      // One-time migration from older versions; never retain a raw key in browser storage.
+      let oldToken = "";
       try {
-        // Try local access before touching old browser credentials (which may be the AI key).
-        access = await apiFetch("/api/access", { token: "", quietAuth: true });
-      } catch (error) {
-        if (error.status !== 401) throw error;
-        let savedToken = "";
-        try { savedToken = localStorage.getItem("ssqAdminToken") || ""; } catch (_) { /* Storage is optional. */ }
-        const token = els.adminToken.value.trim() || savedToken;
-        if (!token) throw error;
-        access = await apiFetch("/api/access", { token, quietAuth: true });
-        els.adminToken.value = token;
-        try { localStorage.setItem("ssqAdminToken", token); } catch (_) { /* Storage is optional. */ }
-      }
-      localAutoAccess = access.mode === "local";
-      els.remoteAuth.classList.add("hidden");
-      if (localAutoAccess) {
-        els.adminToken.value = "";
-        try { localStorage.removeItem("ssqAdminToken"); } catch (_) { /* No browser key needed. */ }
-      }
-      els.aiKeyStatus.textContent = `AI 密钥：${access.keys.ai ? "已配置（仅服务端使用）" : "服务端未配置"}`;
-      els.purchaseKeyStatus.textContent = `购买接口密钥：${access.keys.purchase ? "已配置（独立管理）" : "服务端未配置"}`;
-      els.connectionStatus.textContent = localAutoAccess
-        ? "本地已自动连接，无需输入密钥"
-        : "已连接远程服务";
-      if (access.configured_key_count === 2 && !access.independent_keys) {
-        els.purchaseKeyStatus.textContent = "购买接口密钥：与 AI 密钥重复，请在服务端分开配置";
-      }
-      await loadPurchaseState();
-      if (sessionStorage.getItem(AI_TASK_STORAGE_KEY)) {
-        analyzeWithAi();
-      } else {
-        // Keep the default parameters on page load; older reports remain available on demand.
-        await loadAiHistory();
+        oldToken = localStorage.getItem("ssqAdminToken") || "";
+        localStorage.removeItem("ssqAdminToken");
+      } catch (_) { /* Storage is optional. */ }
+      if (access.purchase_authorized) {
+        await loadPurchaseState();
+      } else if (oldToken) {
+        await unlockPurchases(oldToken);
       }
     } catch (error) {
+      setPurchaseAccess(false);
       els.connectionStatus.textContent = error.message;
-      els.aiKeyStatus.textContent = "AI 密钥：服务未连接，暂未核验";
-      els.purchaseKeyStatus.textContent = "购买接口密钥：服务未连接，暂未核验";
-      els.remoteAuth.classList.toggle("hidden", error.status !== 401);
-      els.purchaseList.innerHTML = emptyPurchaseHtml(error.message);
-      els.aiHistory.innerHTML = emptyPurchaseHtml(error.message);
+      els.aiKeyStatus.textContent = "AI 密钥：连接状态暂未核验（AI 接口独立可用）";
+      els.purchaseKeyStatus.textContent = "购买密钥：连接状态暂未核验";
+      els.remoteAuth.classList.add("hidden");
+      setPurchaseStatus(error.message);
+    }
+    await aiReady;
+  }
+
+  function applyAccessStatus(access) {
+    localAutoAccess = access.mode === "local";
+    els.aiKeyStatus.textContent = `AI 密钥：${access.keys?.ai ? "已配置（仅服务端使用，无需授权）" : "服务端未配置"}`;
+    els.purchaseKeyStatus.textContent = `购买密钥：${access.keys?.purchase ? "已配置（独立管理）" : "服务端未配置"}`;
+    if (access.configured_key_count === 2 && !access.independent_keys) {
+      els.purchaseKeyStatus.textContent = "购买密钥：与 AI 密钥重复，请在服务端分开配置";
+    }
+    setPurchaseAccess(Boolean(access.purchase_authorized));
+  }
+
+  function setPurchaseAccess(unlocked) {
+    purchaseUnlocked = unlocked;
+    purchaseAccessRevision += 1;
+    els.remoteAuth.classList.toggle("hidden", unlocked);
+    els.lockPurchasesBtn.classList.toggle("hidden", !unlocked || localAutoAccess);
+    [els.savePurchaseBtn, els.refreshPurchasesBtn, els.checkNowBtn].forEach((button) => {
+      button.disabled = !unlocked;
+    });
+    els.connectionStatus.textContent = unlocked
+      ? localAutoAccess ? "AI 无需授权 · 本地购买记录已自动解锁" : "AI 无需授权 · 购买记录已解锁（本浏览器记住 30 天）"
+      : "AI 无需授权 · 购买记录未解锁";
+    if (!unlocked) {
+      els.purchaseList.innerHTML = emptyPurchaseHtml("购买记录已锁定，解锁后可查看、保存和核奖；AI 分析不受影响。");
+      setPurchaseStatus("请先解锁购买记录");
+    }
+    renderAiHistory(aiHistoryItems);
+  }
+
+  async function unlockPurchases(migratedToken) {
+    if (unlockingPurchases) return;
+    const token = typeof migratedToken === "string" ? migratedToken : els.adminToken.value.trim();
+    if (!token) {
+      els.adminToken.setAttribute("aria-invalid", "true");
+      setPurchaseStatus("请输入购买密钥后点击解锁；AI 无需填写任何密钥");
+      return;
+    }
+    unlockingPurchases = true;
+    els.connectBtn.disabled = true;
+    setPurchaseStatus("正在解锁购买记录…");
+    try {
+      const access = await apiFetch("/api/session", {
+        method: "POST", body: JSON.stringify({ token }), quietAuth: true
+      });
+      applyAccessStatus(access);
+      await loadPurchaseState();
+    } catch (error) {
+      setPurchaseAccess(false);
+      els.adminToken.setAttribute("aria-invalid", "true");
+      setPurchaseStatus(error.message);
+    } finally {
+      els.adminToken.value = "";
+      try { localStorage.removeItem("ssqAdminToken"); } catch (_) { /* Storage is optional. */ }
+      unlockingPurchases = false;
+      els.connectBtn.disabled = false;
+    }
+  }
+
+  async function lockPurchases() {
+    try {
+      await apiFetch("/api/session", { method: "DELETE" });
+      localAutoAccess = false;
+      setPurchaseAccess(false);
+      els.adminToken.value = "";
+      setPurchaseStatus("已锁定，只有本浏览器退出；AI 分析仍可使用");
+    } catch (error) {
       setPurchaseStatus(error.message);
     }
   }
@@ -1804,12 +1855,10 @@
 
   async function savePurchase() {
     try {
-      const token = accessToken();
       const payload = buildPurchasePayload();
       setPurchaseStatus("保存中...");
       const result = await apiFetch("/api/purchases", {
         method: "POST",
-        token,
         body: JSON.stringify(payload)
       });
       await loadPurchaseState();
@@ -1823,23 +1872,25 @@
   }
 
   async function loadPurchaseState() {
+    if (!purchaseUnlocked) return;
+    const revision = purchaseAccessRevision;
     try {
-      const token = accessToken();
       setPurchaseStatus("读取服务器记录...");
-      const state = await apiFetch("/api/state", { token });
+      const state = await apiFetch("/api/state", {});
+      if (!purchaseUnlocked || revision !== purchaseAccessRevision) return;
       renderPurchases(state.purchases || [], state.results || [], state.latest || null);
       setPurchaseStatus(state.latest ? `服务器数据截至 ${state.latest.date}（${state.latest.issue} 期）` : "已读取记录");
     } catch (error) {
-      els.purchaseList.innerHTML = emptyPurchaseHtml("无法读取服务器购买记录");
+      if (revision !== purchaseAccessRevision) return;
+      if (error.status !== 401) els.purchaseList.innerHTML = emptyPurchaseHtml("无法读取服务器购买记录");
       setPurchaseStatus(error.message);
     }
   }
 
   async function checkNow() {
     try {
-      const token = accessToken();
       setPurchaseStatus("正在核奖...");
-      const result = await apiFetch("/api/check-now", { method: "POST", token });
+      const result = await apiFetch("/api/check-now", { method: "POST" });
       if (!result.ok) {
         throw new Error(result.stderr || result.stdout || "核奖失败");
       }
@@ -1852,8 +1903,7 @@
 
   async function deletePurchase(id) {
     try {
-      const token = accessToken();
-      await apiFetch(`/api/purchases/${encodeURIComponent(id)}`, { method: "DELETE", token });
+      await apiFetch(`/api/purchases/${encodeURIComponent(id)}`, { method: "DELETE" });
       setPurchaseStatus("已删除");
       await loadPurchaseState();
     } catch (error) {
@@ -1957,12 +2007,13 @@
       throw new Error("请打开本地服务 http://127.0.0.1:8000/，不要直接打开 HTML 文件");
     }
     const headers = { "Content-Type": "application/json", "X-SSQ-Local": "1" };
-    if (options.token) headers.Authorization = `Bearer ${options.token}`;
     let response;
     try {
       response = await fetch(path, {
         method: options.method || "GET",
         headers,
+        credentials: path.startsWith("/api/ai/") && options.method !== "DELETE" ? "omit" : "same-origin",
+        cache: "no-store",
         body: options.body
       });
     } catch (_) {
@@ -1970,9 +2021,10 @@
     }
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      if (response.status === 401 && !options.quietAuth) els.remoteAuth.classList.remove("hidden");
+      if (response.status === 401 && !options.quietAuth
+          && (!path.startsWith("/api/ai/") || options.method === "DELETE")) setPurchaseAccess(false);
       const message = response.status === 401
-        ? "服务尚未授权：本地请使用默认启动方式；远程服务需验证访问密钥"
+        ? (data.error || "请先解锁购买记录；AI 分析无需授权")
         : data.error || `请求失败 ${response.status}`;
       const error = new Error(message);
       error.status = response.status;
@@ -1983,7 +2035,7 @@
   }
 
   function accessToken() {
-    return localAutoAccess ? "" : els.adminToken.value.trim();
+    return ""; // Compatibility only: browser requests now use HttpOnly sessions, never raw keys.
   }
 
   function setPurchaseStatus(text) {

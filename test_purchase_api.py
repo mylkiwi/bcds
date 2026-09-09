@@ -179,14 +179,14 @@ class AiTaskApiTests(unittest.TestCase):
             release.set()
             self.wait_for_status(first["status_url"], "succeeded")
 
-    def test_invalid_payload_and_unauthorized_requests_do_not_consume_quota(self):
+    def test_invalid_payload_and_locked_purchases_do_not_consume_quota(self):
         code, _ = self.request(
             "/api/ai/tasks",
             method="POST",
             payload={"red_count": "invalid", "client_request_id": "client-request-bad01"},
         )
         self.assertEqual(code, 400)
-        code, _ = self.request("/api/ai/tasks", method="POST", payload={}, authorized=False)
+        code, _ = self.request("/api/purchases", method="POST", payload={}, authorized=False)
         self.assertEqual(code, 401)
         self.assertEqual(purchase_api.AI_REQUEST_TIMES, [])
 
@@ -198,7 +198,7 @@ class AiTaskApiTests(unittest.TestCase):
             )
             self.assertEqual(code, 202)
             code, _ = self.request(task["status_url"], authorized=False)
-            self.assertEqual(code, 401)
+            self.assertEqual(code, 200)
             self.wait_for_status(task["status_url"], "succeeded")
 
     def test_synchronous_endpoint_remains_compatible(self):

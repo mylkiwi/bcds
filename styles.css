@@ -150,10 +150,6 @@ textarea {
   -webkit-text-security: disc;
 }
 
-.secret-input:focus {
-  -webkit-text-security: none;
-}
-
 .secret-input[aria-invalid="true"] {
   border-color: var(--red);
   box-shadow: 0 0 0 3px rgba(215, 59, 62, 0.14);
